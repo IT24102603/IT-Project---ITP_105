@@ -95,5 +95,36 @@
       </div>
 
   <script src="js/app.js"></script>
+
+        <!-- Task Planner -->
+      <div id="page-tasks" class="page">
+        <h1>Smart Task Planner</h1>
+        <p class="subtitle">Prioritize by GPA impact and deadline</p>
+        <form id="task-add-form" class="form-inline">
+          <div class="form-group flex-1"><label>Task</label><input type="text" name="title" placeholder="e.g. Assignment 2" required></div>
+          <div class="form-group">
+            <label>Type</label>
+            <select name="type">
+              <option value="assignment">Assignment</option>
+              <option value="quiz">Quiz</option>
+              <option value="presentation">Presentation</option>
+              <option value="exam">Exam</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Module</label>
+            <select name="module_id" id="task-module-select"><option value="">–</option></select>
+          </div>
+          <div class="form-group"><label>Due date</label><input type="date" name="due_date"></div>
+          <div class="form-group"><label>Priority (1–10)</label><input type="number" name="priority_score" min="1" max="10" value="5"></div>
+          <div class="form-group"><label>&nbsp;</label><button type="submit" class="btn btn-primary">Add task</button></div>
+        </form>
+        <div class="section">
+          <h2>Tasks</h2>
+          <div id="tasks-list"></div>
+        </div>
+      </div>
+
+      
 </body>
 </html>
