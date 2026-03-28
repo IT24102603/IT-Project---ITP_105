@@ -172,4 +172,19 @@
 
   // Init: show auth (no persisted session for demo)
   showAuth();
+  function loadRepeat() {
+    const page = document.getElementById("page-repeat");
+
+    if (page) {
+      console.log("Repeat & Improvement page loaded");
+
+      const button = page.querySelector("button");
+
+      if (button) {
+        button.addEventListener("click", () => {
+          alert("Result updated successfully!");
+        });
+      }
+    }
+  }
 })();
