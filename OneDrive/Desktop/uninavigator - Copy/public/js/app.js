@@ -54,15 +54,6 @@
     return await res.json();
   }
 
-  async function patch(url, data) {
-    const res = await fetch(API + url, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    return await res.json();
-  }
-
   async function del(url) {
     await fetch(API + url, { method: "DELETE" });
   }
