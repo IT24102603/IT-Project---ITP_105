@@ -480,3 +480,19 @@ tr:hover td {
 .sidebar .nav-logout:hover {
   color: var(--danger);
 }
+.sidebar .nav-logout:hover {
+  color: var(--danger);
+}
+
+/* Repeat & Improvement Page */
+#page-repeat {
+  padding: 1rem;
+}
+
+#page-repeat input {
+  margin-bottom: 0.75rem;
+}
+
+#page-repeat button {
+  margin-top: 0.5rem;
+}
