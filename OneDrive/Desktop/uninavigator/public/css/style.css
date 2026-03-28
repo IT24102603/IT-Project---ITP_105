@@ -396,18 +396,6 @@ tr:hover td {
 .attendance-bar .fill.warning { background: var(--warning); }
 .attendance-bar .fill.danger { background: var(--danger); }
 
-/* Task priority badge */
-.badge {
-  display: inline-block;
-  padding: 0.2rem 0.5rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  border-radius: 4px;
-}
-
-.badge-high { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
-.badge-medium { background: rgba(245, 158, 11, 0.2); color: #fcd34d; }
-.badge-low { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
 
 /* Section */
 .section {
@@ -765,66 +753,6 @@ tr:hover td {
   font-size: 0.9rem;
 }
 
-/* Deadline alert banner */
-.deadline-alert-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 1rem;
-  margin-bottom: 1rem;
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  border-radius: var(--radius);
-  color: var(--text);
-}
-
-.deadline-alert-icon {
-  font-size: 1.25rem;
-}
-
-.deadline-alert-msg {
-  flex: 1;
-  font-size: 0.95rem;
-}
-
-.deadline-alert-item {
-  display: inline-block;
-  margin-right: 0.75rem;
-  margin-bottom: 0.25rem;
-}
-
-.deadline-alert-link {
-  color: var(--accent);
-  font-weight: 600;
-  font-size: 0.9rem;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.deadline-alert-link:hover {
-  text-decoration: underline;
-}
-
-/* Goal planner (GPA) */
-.goal-planner-section .goal-planner-form {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.goal-planner-result {
-  padding: 1rem;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  margin-top: 1rem;
-}
-
-.goal-planner-result h4 {
-  margin-bottom: 0.5rem;
-}
 
 .subtitle.small {
   font-size: 0.9rem;

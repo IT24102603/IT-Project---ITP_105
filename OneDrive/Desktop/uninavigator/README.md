@@ -1,6 +1,6 @@
 # UniNavigator (ITP_105)
 
-Academic performance management for Sri Lankan university students – GPA/CGPA, attendance (80% rule), task planner, repeat & improvement, and PDF report.
+Academic performance management for Sri Lankan university students – attendance (80% rule) and PDF report.
 
 ## Run the project
 
@@ -45,10 +45,7 @@ Copy `.env.example` to `.env` and edit values.
 ## Features (from ITP_105 PDF)
 
 - **User management** – Register, login, profile
-- **GPA Tracker & Goal Calculator** – Weighted credit method; add modules, view CGPA and semester GPAs
-- **Repeat & Improvement** – View academic history, edit/delete modules; CGPA recalculates
 - **Attendance Tracker** – 80% rule; total sessions, attended, justified absences; safe absences left
-- **Smart Task Planner** – Add tasks by type (assignment, quiz, presentation), due date, priority
 - **Profile & Report** – Download academic report as PDF
 
 ## Tech stack
