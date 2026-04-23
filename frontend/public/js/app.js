@@ -111,48 +111,315 @@
     await fetch(API + url, { method: "DELETE", credentials: "include" });
   }
 
- 
   // ==============================
-  // Dashboard (Profile + Report + Goals + GPA)
+  // Usage analytics helpers
   // ==============================
 
-  async function loadDashboard() {
+  async function trackUsage(event_type, page, meta) {
     if (!currentUser) return;
+    const payload = {
+      user_id: currentUser.id,
+      event_type,
+      page: page || null,
+      meta: meta || null,
+    };
+    try {
+      await fetch(API + "/analytics/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+        credentials: "include",
+      });
+    } catch (_) {}
+  }
 
-    const [gpaData, profile, timetables] = await Promise.all([
-      get("/users/" + currentUser.id + "/gpa"),
-      get("/users/" + currentUser.id + "/profile").catch(() => currentUser),
-      get("/users/" + currentUser.id + "/timetables").catch(() => []),
-    ]);
+  // Distance between lat/lng points (meters)
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000; // earth radius
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
 
-    const cgpa = gpaData.overall?.gpa ?? 0;
-    const modulesAll = gpaData.modules || [];
-    const currentSemester = Math.max(
-      1,
-      ...modulesAll.map((m) => {
-        const s = parseInt(m.semester, 10);
-        return isNaN(s) ? 1 : s;
-      })
-    );
-    const currentSemesterModules = modulesAll.filter((m) => (parseInt(m.semester, 10) || 1) === currentSemester);
-    const moduleCount = currentSemesterModules.length;
-    const targetGpa = profile.target_gpa != null ? profile.target_gpa : "–";
-    const targetAtt = profile.target_attendance != null ? profile.target_attendance : 80;
+  // ==============================
+  // Auth & Navigation
+  // ==============================
 
-    document.getElementById("dashboard-name").textContent = profile.name || currentUser.name || "Student";
-    document.getElementById("dashboard-index").textContent = profile.index_number ? "Index: " + profile.index_number : "–";
-    document.getElementById("dashboard-email").textContent = profile.email || currentUser.email || "–";
+  async function login(e) {
+    e.preventDefault();
+    const email = document.getElementById("login-email").value?.trim() || "";
+    const password = document.getElementById("login-password").value || "";
+    const authError = document.getElementById("auth-error");
+    if (authError) authError.classList.add("hidden");
+    if (!email || !password) {
+      if (authError) { authError.textContent = "Email and password are required"; authError.classList.remove("hidden"); }
+      return;
+    }
+    const user = await post("/login", { email, password });
+    if (!user || user.error) {
+      const el = document.getElementById("auth-error");
+      if (el) { el.textContent = user?.error || "Invalid login"; el.classList.remove("hidden"); }
+      return;
+    }
+    currentUser = user;
+    showApp();
+  }
 
-    const picEl = document.getElementById("profile-pic");
-    if (picEl && (profile.profile_pic || currentUser.profile_pic)) {
-      picEl.src = profile.profile_pic || currentUser.profile_pic;
+  async function tryResumeSession() {
+    try {
+      const res = await get("/me");
+      if (res && res.user && res.user.id) {
+        currentUser = res.user;
+        showApp();
+      }
+    } catch (_) {}
+  }
+
+  async function register(e) {
+    e.preventDefault();
+    const name = (document.getElementById("reg-name").value || "").trim();
+    const email = (document.getElementById("reg-email").value || "").trim();
+    const password = document.getElementById("reg-password").value || "";
+    const regError = document.getElementById("register-error");
+    if (regError) regError.classList.add("hidden");
+    if (!name || name.length > 255) {
+      if (regError) { regError.textContent = "Name is required (1–255 characters)"; regError.classList.remove("hidden"); }
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!email || !emailRegex.test(email)) {
+      if (regError) { regError.textContent = "Enter a valid email address"; regError.classList.remove("hidden"); }
+      return;
+    }
+    if (!password || password.length < 6) {
+      if (regError) { regError.textContent = "Password must be at least 6 characters"; regError.classList.remove("hidden"); }
+      return;
+    }
+    const result = await post("/register", { name, email, password });
+    if (result.error) {
+      const el = document.getElementById("register-error");
+      if (el) { el.textContent = result.error; el.classList.remove("hidden"); }
+      return;
+    }
+    alert("Registration successful! Sign in with your email.");
+    document.getElementById("show-login").click();
+  }
+
+  const deadlineNotifiedIds = new Set();
+
+  function showApp() {
+    document.getElementById("auth-screen").classList.add("hidden");
+    document.getElementById("register-screen").classList.add("hidden");
+    document.getElementById("app").classList.remove("hidden");
+
+    const sidebarName = document.getElementById("sidebar-name");
+    const sidebarEmail = document.getElementById("sidebar-email");
+    if (sidebarName) sidebarName.textContent = currentUser.name || "Student";
+    if (sidebarEmail) sidebarEmail.textContent = currentUser.email || "";
+
+    const isAdmin = currentUser?.role === "admin";
+    document.querySelectorAll(".admin-only").forEach((el) => {
+      el.classList.toggle("hidden", !isAdmin);
+    });
+    document.querySelectorAll(".student-only").forEach((el) => {
+      el.classList.toggle("hidden", isAdmin);
+    });
+
+    initNavigation();
+
+    if (isAdmin) {
+      showPage("admin-dashboard");
+      loadAdminDashboard();
+      loadAdminUsers();
+      loadAdminUniversitiesForHalls();
+      loadAdminConcerns();
+      // Timetable uploads are handled by students only
+      loadAdminUsage();
+    } else {
+      loadDashboard();
+      loadAttendance();
+      loadRepeat();
+      loadTasks();
+      showPage("dashboard");
+      checkUpcomingDeadlines();
+      if (window.deadlineCheckInterval) clearInterval(window.deadlineCheckInterval);
+      window.deadlineCheckInterval = setInterval(checkUpcomingDeadlines, 30 * 60 * 1000);
+    }
+  }
+
+  function showDeadlinePrefsSaved() {
+    const el = document.getElementById("save-notification-prefs");
+    if (!el) return;
+    const orig = el.textContent;
+    el.textContent = "Saved!";
+    setTimeout(() => { el.textContent = orig; }, 1500);
+  }
+
+  async function checkUpcomingDeadlines() {
+    if (!currentUser || currentUser.notify_deadlines === false) return;
+    const days = Math.min(30, Math.max(1, parseInt(currentUser.deadline_reminder_days, 10) || 3));
+    let tasks = [];
+    try {
+      tasks = await get("/users/" + currentUser.id + "/tasks");
+    } catch (_) {}
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const upcoming = tasks.filter((t) => {
+      if (t.completed || !t.due_date) return false;
+      const due = new Date(t.due_date);
+      due.setHours(0, 0, 0, 0);
+      const diffDays = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+      return diffDays >= 0 && diffDays <= days;
+    });
+    if (upcoming.length === 0) {
+      const banner = document.getElementById("deadline-alert-banner");
+      if (banner) { banner.classList.add("hidden"); banner.innerHTML = ""; }
+      return;
+    }
+    const toNotify = upcoming.filter((t) => !deadlineNotifiedIds.has(t.id));
+    const banner = document.getElementById("deadline-alert-banner");
+    if (banner) {
+      banner.classList.remove("hidden");
+      const list = upcoming.slice(0, 5).map((t) => {
+        const due = new Date(t.due_date);
+        const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+        const dayText = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff + " days";
+        return `<span class="deadline-alert-item">${t.title} — ${dayText}</span>`;
+      }).join("");
+      banner.innerHTML = `<span class="deadline-alert-icon"></span><span class="deadline-alert-msg">Deadlines soon: ${list}</span><a href="#" data-page="tasks" class="deadline-alert-link">View tasks</a>`;
+      banner.querySelector(".deadline-alert-link")?.addEventListener("click", (e) => { e.preventDefault(); showPage("tasks"); });
+    }
+    if (toNotify.length > 0 && "Notification" in window && Notification.permission === "granted") {
+      toNotify.forEach((t) => {
+        deadlineNotifiedIds.add(t.id);
+        const due = new Date(t.due_date);
+        const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+        const when = diff === 0 ? "today" : diff === 1 ? "tomorrow" : "in " + diff + " days";
+        new Notification("UniNavigator: Deadline soon", { body: t.title + " is due " + when, icon: "/favicon.ico" });
+      });
+    } else if (toNotify.length > 0) {
+      toNotify.forEach((t) => deadlineNotifiedIds.add(t.id));
+    }
+  }
+
+  function showPage(pageId) {
+    document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
+    document.querySelectorAll(".nav-link").forEach((l) => l.classList.remove("active"));
+    const page = document.getElementById("page-" + pageId);
+    const link = document.querySelector('.nav-link[data-page="' + pageId + '"]');
+    if (page) page.classList.add("active");
+    if (link) link.classList.add("active");
+
+    trackUsage("page_view", pageId);
+
+    if (pageId === "gpa") loadGpaPage();
+    if (pageId === "attendance") loadAttendancePage();
+    if (pageId === "tasks") loadTasks();
+    if (pageId === "repeat") loadRepeat();
+    if (pageId === "concerns") loadConcernsPage();
+
+    if (pageId === "admin-dashboard") loadAdminDashboard();
+    if (pageId === "admin-users") loadAdminUsers();
+    if (pageId === "admin-halls") loadAdminHallsPage();
+    if (pageId === "admin-concerns") loadAdminConcerns();
+    if (pageId === "admin-usage") loadAdminUsage();
+  }
+
+  function initNavigation() {
+    document.querySelectorAll(".nav-link[data-page]").forEach((link) => {
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        showPage(link.getAttribute("data-page"));
+      });
+    });
+  }
+
+    // Notification (deadline alerts) prefs
+    const notifyCheckbox = document.getElementById("notify-deadlines-checkbox");
+    const reminderDaysSelect = document.getElementById("deadline-reminder-days");
+    const saveNotifBtn = document.getElementById("save-notification-prefs");
+    if (notifyCheckbox) notifyCheckbox.checked = profile.notify_deadlines !== false && currentUser.notify_deadlines !== false;
+    if (reminderDaysSelect) reminderDaysSelect.value = String(profile.deadline_reminder_days || currentUser.deadline_reminder_days || 3);
+    if (saveNotifBtn) {
+      saveNotifBtn.onclick = async () => {
+        const enabled = notifyCheckbox ? notifyCheckbox.checked : true;
+        const days = reminderDaysSelect ? parseInt(reminderDaysSelect.value, 10) : 3;
+        if (enabled && "Notification" in window && Notification.permission === "default") {
+          await Notification.requestPermission();
+        }
+        await put("/users/" + currentUser.id + "/profile", { notify_deadlines: enabled, deadline_reminder_days: days });
+        currentUser.notify_deadlines = enabled;
+        currentUser.deadline_reminder_days = days;
+        showDeadlinePrefsSaved();
+      };
     }
 
-    document.getElementById("dashboard-current-gpa").textContent = cgpa;
-    document.getElementById("dashboard-target-gpa").textContent = targetGpa;
-    document.getElementById("dashboard-target-attendance").textContent = targetAtt + "%";
-    document.getElementById("dashboard-module-count").textContent = moduleCount;
+    // Goals edit
+    const editBtn = document.getElementById("edit-goals-btn");
+    const editFields = document.getElementById("goals-edit-fields");
+    const saveBtn = document.getElementById("save-goals-btn");
+    if (editBtn && editFields) {
+      editBtn.onclick = () => {
+        editFields.classList.toggle("hidden");
+        if (!editFields.classList.contains("hidden")) {
+          document.getElementById("edit-target-gpa").value = targetGpa !== "–" ? targetGpa : "";
+          document.getElementById("edit-target-attendance").value = targetAtt !== "–" ? targetAtt : 80;
+        }
+      };
+    }
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        const tg = parseFloat(document.getElementById("edit-target-gpa").value);
+        const ta = parseInt(document.getElementById("edit-target-attendance").value, 10);
+        if (!isNaN(tg) && (tg < 0 || tg > 4)) {
+          alert("Target GPA must be between 0 and 4");
+          return;
+        }
+        if (!isNaN(ta) && (ta < 0 || ta > 100)) {
+          alert("Target attendance must be between 0 and 100");
+          return;
+        }
+        const res = await put("/users/" + currentUser.id + "/profile", {
+          target_gpa: isNaN(tg) ? null : tg,
+          target_attendance: isNaN(ta) ? 80 : ta,
+        });
+        if (res && res.error) {
+          alert(res.error);
+          return;
+        }
+        currentUser.target_gpa = tg;
+        currentUser.target_attendance = ta;
+        editFields.classList.add("hidden");
+        loadDashboard();
+      };
+    }
 
+    // GPA line chart
+    const labels = (gpaData.modules || [])
+      .filter((m) => m.grade_point != null)
+      .map((m) => m.name);
+    const grades = (gpaData.modules || [])
+      .filter((m) => m.grade_point != null)
+      .map((m) => parseFloat(m.grade_point));
+
+    const gpaCtx = document.getElementById("gpaChart");
+    if (gpaCtx) {
+      if (gpaChart) gpaChart.destroy();
+      gpaChart = new Chart(gpaCtx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [{ label: "Grade Points", data: grades, borderColor: "#00c9a7", tension: 0.2 }],
+        },
+        options: { responsive: true, maintainAspectRatio: true },
+      });
+    }
 
     // Dashboard attendance chart (from attendance logs: includes delivery_mode)
     const attData = await get("/users/" + currentUser.id + "/attendance-logs").catch(() => []);
@@ -229,531 +496,149 @@
         : "<tr><td colspan=\"5\">No timetable uploads yet</td></tr>";
     }
   }
+  
 
   // ==============================
-  // Attendance (modules dropdown + add module)
+  // Task Planner (chart: target vs current)
   // ==============================
 
-  async function loadAttendancePage() {
+  async function loadTasks() {
     if (!currentUser) return;
-    const [modules, attendanceLogs, universities] = await Promise.all([
+    const [tasks, modules] = await Promise.all([
+      get("/users/" + currentUser.id + "/tasks"),
       get("/users/" + currentUser.id + "/modules"),
-      get("/users/" + currentUser.id + "/attendance-logs"),
-      get("/universities"),
     ]);
+    const moduleByCode = new Map((modules || []).map((m) => [normalizeCode(m.code), m]));
+    tasks.sort((a, b) => {
+      const pa = parseInt(a.priority_score, 10) || 0;
+      const pb = parseInt(b.priority_score, 10) || 0;
+      if (pa !== pb) return pb - pa; // highest priority first
+      const da = a.due_date ? String(a.due_date) : "9999-12-31";
+      const db = b.due_date ? String(b.due_date) : "9999-12-31";
+      return da < db ? -1 : da > db ? 1 : 0;
+    });
 
-    attendanceUniversities = universities || [];
-    const attendance = attendanceLogs || [];
-
-    const uniSelect = document.getElementById("attendance-university-select");
-    const addModuleUniSelect = document.getElementById("attendance-module-university");
-    if (uniSelect) {
-      uniSelect.innerHTML =
-        '<option value="">Select university</option>' +
-        attendanceUniversities
-          .map((u) => `<option value="${u.id}">${u.name}</option>`)
-          .join("");
-      selectedAttendanceUniversityId = attendanceUniversities.length ? attendanceUniversities[0].id : null;
-      if (selectedAttendanceUniversityId) uniSelect.value = String(selectedAttendanceUniversityId);
-    }
-    if (addModuleUniSelect) {
-      addModuleUniSelect.innerHTML =
-        '<option value="">Select university</option>' +
-        attendanceUniversities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-      if (selectedAttendanceUniversityId) addModuleUniSelect.value = String(selectedAttendanceUniversityId);
-    }
-
-    const hallsSummaryEl = document.getElementById("attendance-halls-summary");
-    const hallSelect = document.getElementById("attendance-hall-select");
-
-    function filterModulesByYearSem() {
-      const ay = parsePositiveInt(document.getElementById("attendance-slot-year")?.value);
-      const sem = parsePositiveInt(document.getElementById("attendance-slot-semester")?.value);
-      return (modules || []).filter((m) => {
-        const my = parsePositiveInt(m.academic_year);
-        const ms = parsePositiveInt(m.semester_in_year);
-        if (!ay || !sem) return true;
-        return my === ay && ms === sem;
+    const listEl = document.getElementById("tasks-list");
+    if (!tasks.length) {
+      listEl.innerHTML = '<p class="empty-state">No tasks yet. Add one above.</p>';
+    } else {
+      const grouped = {};
+      tasks.forEach((t) => {
+        const mod = moduleByCode.get(normalizeCode(t.module_code));
+        const credits = mod?.credits || 0;
+        const key = credits > 0 ? `${credits} Credits` : "Unassigned / Unknown Credits";
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(t);
       });
+      const sortedGroups = Object.keys(grouped).sort((a, b) => {
+        const na = parseInt(a, 10) || 0;
+        const nb = parseInt(b, 10) || 0;
+        return nb - na;
+      });
+      listEl.innerHTML = sortedGroups
+        .map((groupName) => {
+          const rows = grouped[groupName];
+          return `
+            <div class="card" style="margin-bottom:0.75rem;">
+              <h3 style="margin-bottom:0.5rem;">${groupName}</h3>
+              ${rows
+                .map(
+                  (t) => `
+                  <div style="margin-bottom:0.5rem; display:flex; align-items:center; justify-content:space-between;">
+                    <div>
+                      <span style="text-decoration:${t.completed ? "line-through" : "none"}">${t.title}</span>
+                      <span class="text-muted">${t.module_code ? " | " + t.module_code : ""}</span>
+                      ${t.due_date ? `<span class="text-muted">Due: ${t.due_date}</span>` : ""}
+                      <span class="badge badge-${t.priority_score >= 8 ? "high" : t.priority_score >= 5 ? "medium" : "low"}">P${t.priority_score}</span>
+                    </div>
+                    <div class="actions">
+                      <button type="button" class="btn btn-ghost btn-small" data-task-toggle="${t.id}" data-completed="${t.completed}">${t.completed ? "Undo" : "Complete"}</button>
+                      <button type="button" class="btn btn-ghost btn-small" data-task-delete="${t.id}">Delete</button>
+                    </div>
+                  </div>`
+                )
+                .join("")}
+            </div>
+          `;
+        })
+        .join("");
     }
 
-    function renderAttendanceModuleDropdowns() {
-      const filtered = filterModulesByYearSem();
-      const select = document.getElementById("attendance-module-select");
-      if (select) {
-        select.innerHTML =
-          '<option value="">Select module</option>' +
-          filtered.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
-      }
-      const slotModuleSelect = document.getElementById("attendance-slot-module-select");
-      if (slotModuleSelect) {
-        slotModuleSelect.innerHTML =
-          '<option value="">Select module</option>' +
-          filtered.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
-      }
-    }
-    renderAttendanceModuleDropdowns();
-    const slotSemSel = document.getElementById("attendance-slot-semester");
-    const slotYearSel = document.getElementById("attendance-slot-year");
-    if (slotSemSel && !slotSemSel.dataset.moduleFilterBound) {
-      slotSemSel.dataset.moduleFilterBound = "1";
-      slotSemSel.addEventListener("change", renderAttendanceModuleDropdowns);
-    }
-    if (slotYearSel && !slotYearSel.dataset.moduleFilterBound) {
-      slotYearSel.dataset.moduleFilterBound = "1";
-      slotYearSel.addEventListener("change", renderAttendanceModuleDropdowns);
-    }
+    listEl.querySelectorAll("[data-task-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-task-toggle");
+        const completed = btn.getAttribute("data-completed") === "1";
+        const newCompleted = !completed;
+        await patch("/tasks/" + id, { completed: newCompleted });
+        loadTasks();
+        trackUsage(newCompleted ? "task_complete" : "task_uncomplete", "tasks", { task_id: id });
+      });
+    });
+    listEl.querySelectorAll("[data-task-delete]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-task-delete");
+        await del("/tasks/" + id);
+        loadTasks();
+        trackUsage("task_delete", "tasks", { task_id: id });
+      });
+    });
 
-    const tbody = document.getElementById("attendance-table");
-    tbody.innerHTML = attendance.length
-      ? attendance
-          .map((a) => {
-            const pct = Math.round((a.attended / (a.total_sessions || 1)) * 100);
-            const modeLabel = a.delivery_mode === "online" ? " (Online)" : " (Physical)";
-            return `<tr><td>${a.module_name}${modeLabel}</td><td>${a.attended}</td><td>${a.total_sessions}</td><td>${pct}%</td></tr>`;
-          })
-          .join("")
-      : "<tr><td colspan=\"4\">No attendance records yet</td></tr>";
-
-    const ctx = document.getElementById("page-attendanceChart");
+    const completedCount = tasks.filter((t) => t.completed).length;
+    const totalCount = tasks.length;
+    const ctx = document.getElementById("tasksChart");
     if (ctx) {
-      if (pageAttendanceChart) pageAttendanceChart.destroy();
-      pageAttendanceChart = new Chart(ctx, {
+      if (tasksChart) tasksChart.destroy();
+      tasksChart = new Chart(ctx, {
         type: "bar",
         data: {
-          labels: attendance.map((a) => `${a.module_name}${a.delivery_mode === "online" ? " (Online)" : " (Physical)"}`),
+          labels: ["Completed", "Remaining"],
           datasets: [
             {
-              label: "Attendance %",
-              data: attendance.map((a) => Math.round((a.attended / (a.total_sessions || 1)) * 100)),
-              backgroundColor: attendance.map((a) =>
-                a.delivery_mode === "online" ? "rgba(59,130,246,0.6)" : "rgba(0,201,167,0.6)"
-              ),
+              label: "Tasks",
+              data: [completedCount, Math.max(0, totalCount - completedCount)],
+              backgroundColor: ["#10b981", "#2d3a4f"],
             },
           ],
         },
-        options: { responsive: true, maintainAspectRatio: true },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          plugins: { title: { display: true, text: "Target: complete all tasks | Current: " + completedCount + " / " + totalCount } },
+        },
       });
     }
-//GEOFENCE COORDIBNTION
-    // Load halls for selected university (circle geofences)
-    async function loadSelectedHalls() {
-      if (!selectedAttendanceUniversityId) {
-        attendanceHalls = [];
-        if (hallsSummaryEl) hallsSummaryEl.textContent = "No halls configured";
-        return;
-      }
-      attendanceHalls = await get("/universities/" + selectedAttendanceUniversityId + "/halls");
-      if (hallsSummaryEl) {
-        hallsSummaryEl.textContent = attendanceHalls.length
-          ? `${attendanceHalls.length} lecture hall circle(s) configured`
-          : "No halls configured for this university";
-      }
-      if (hallSelect) {
-        hallSelect.innerHTML =
-          '<option value="">Select hall</option>' +
-          attendanceHalls
-            .map((h) => `<option value="${h.id}">${h.hall_name}${h.building_name ? " (" + h.building_name + ")" : ""}</option>`)
-            .join("");
-      }
-
-      const slotHallSelect = document.getElementById("attendance-slot-hall-select");
-      if (slotHallSelect) {
-        slotHallSelect.innerHTML =
-          '<option value="">Select hall</option>' +
-          attendanceHalls
-            .map((h) => `<option value="${h.id}">${h.hall_name}${h.building_name ? " (" + h.building_name + ")" : ""}</option>`)
-            .join("");
-      }
-    }
-
-    if (uniSelect) {
-      uniSelect.onchange = async () => {
-        selectedAttendanceUniversityId = uniSelect.value ? parseInt(uniSelect.value, 10) : null;
-        // Reset UI when changing geofence source
-        document.getElementById("attendance-mark-section")?.classList.add("hidden");
-        document.getElementById("geofence-outside-msg")?.classList.add("hidden");
-        document.getElementById("geofence-status-card")?.classList.remove("within", "outside");
-        document.getElementById("geofence-status-text").textContent = "Check your location to mark attendance";
-        document.getElementById("geofence-status-detail").textContent = 'Tap "Check location" to verify you are inside a lecture hall circle';
-
-        await loadSelectedHalls();
-      };
-    }
-
-    await loadSelectedHalls();
-
-    // Prefill slot semester/year from timetable upload inputs (if present)
-    const timetableSemester = document.getElementById("attendance-timetable-semester")?.value;
-    const timetableYear = document.getElementById("attendance-timetable-year")?.value;
-    const slotSem = document.getElementById("attendance-slot-semester");
-    const slotYear = document.getElementById("attendance-slot-year");
-    if (slotSem && timetableSemester) slotSem.value = timetableSemester;
-    if (slotYear && timetableYear) slotYear.value = timetableYear;
-    renderAttendanceModuleDropdowns();
   }
 
-  async function loadAttendance() {
-    await loadAttendancePage();
-  }
-
-  function initAttendance() {
-    const timetableForm = document.getElementById("attendance-timetable-upload-form");
-    if (timetableForm && !timetableForm.dataset.bound) {
-      timetableForm.dataset.bound = "1";
-      timetableForm.addEventListener("submit", async (e) => {
+  function initTasksForm() {
+    const form = document.getElementById("task-add-form");
+    if (form) {
+      form.addEventListener("submit", async (e) => {
         e.preventDefault();
-        if (currentUser?.role !== "student") {
-          return alert("Only students can upload timetables.");
-        }
-        const universityId = document.getElementById("attendance-university-select")?.value;
-        const semester = document.getElementById("attendance-timetable-semester")?.value || "";
-        const yearNumber = document.getElementById("attendance-timetable-year")?.value || "";
-        const fileInput = document.getElementById("attendance-timetable-file");
-        const file = fileInput?.files?.[0];
-
-        if (!universityId) return alert("Select a university first.");
-        if (!semester.trim()) return alert("Enter semester.");
-        if (!yearNumber || isNaN(parseInt(yearNumber, 10))) return alert("Enter a valid academic year.");
-        if (!file) return alert("Select a PDF file.");
-
-        const fd = new FormData();
-        fd.append("user_id", currentUser.id);
-        fd.append("university_id", universityId);
-        fd.append("semester", semester.trim());
-        fd.append("year_number", parseInt(yearNumber, 10));
-        fd.append("file", file);
-
-        const msgEl = document.getElementById("attendance-timetable-upload-msg");
-        if (msgEl) {
-          msgEl.classList.remove("hidden");
-          msgEl.textContent = "Uploading...";
-        }
-
-        const resp = await fetch(API + "/attendance/timetable-pdfs", { method: "POST", body: fd, credentials: "include" });
-        const json = await resp.json().catch(() => ({}));
-        if (!resp.ok || json.error) {
-          if (msgEl) msgEl.textContent = json.error || "Upload failed";
+        const title = (document.getElementById("task-title").value || "").trim();
+        const module_code = normalizeCode(document.getElementById("task-module-code").value || "");
+        const due_date = document.getElementById("task-due-date").value || null;
+        const priority_score = parseInt(document.getElementById("task-priority").value, 10) || 5;
+        if (!module_code) {
+          alert("Module code is required");
           return;
         }
-        if (msgEl) msgEl.textContent = "Timetable uploaded successfully.";
-        trackUsage("timetable_upload", "attendance", { university_id: universityId, semester, year_number: parseInt(yearNumber, 10) });
-      });
-    }
-
-    // ==============================
-    // Day-wise schedule slots
-    // ==============================
-
-    const slotAddForm = document.getElementById("attendance-slot-add-form");
-    const slotsTbody = document.getElementById("attendance-slots-tbody");
-    const slotSelect = document.getElementById("attendance-slot-select");
-    const slotDaySelect = document.getElementById("attendance-slot-day");
-    const slotModeSelect = document.getElementById("attendance-slot-mode");
-    const slotHallGroup = document.getElementById("attendance-slot-hall-group");
-    const slotHallSelect = document.getElementById("attendance-slot-hall-select");
-
-    let attendanceSlotsForDay = [];
-
-    function dayOfWeekFromDate(dateStr) {
-      if (!dateStr) return "";
-      const d = new Date(dateStr + "T00:00:00");
-      if (isNaN(d.getTime())) return "";
-      const idx = d.getDay(); // 0 Sun ... 6 Sat
-      const map = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-      return map[idx] || "";
-    }
-
-    function syncSlotHallUI() {
-      const mode = slotModeSelect?.value || "physical";
-      if (slotHallGroup) slotHallGroup.classList.toggle("hidden", mode !== "physical");
-    }
-
-    if (slotModeSelect && !slotModeSelect.dataset.bound) {
-      slotModeSelect.dataset.bound = "1";
-      slotModeSelect.addEventListener("change", syncSlotHallUI);
-      syncSlotHallUI();
-    }
-
-    async function refreshSlotsList() {
-      if (!slotsTbody) return;
-      const universityId = document.getElementById("attendance-university-select")?.value;
-      const semester = document.getElementById("attendance-slot-semester")?.value || "";
-      const yearNumber = document.getElementById("attendance-slot-year")?.value || "";
-      if (!universityId || !semester || !yearNumber) {
-        slotsTbody.innerHTML = "<tr><td colspan=\"5\">Select university, semester & year to view slots</td></tr>";
-        return;
-      }
-      const rows = await get(
-        `/attendance/slots?user_id=${currentUser.id}&university_id=${universityId}&semester=${semester}&year_number=${yearNumber}`
-      ).catch(() => []);
-      slotsTbody.innerHTML = rows.length
-        ? rows
-            .map(
-              (s) => `
-                <tr>
-                  <td>${s.day_of_week}</td>
-                  <td>${s.start_time} - ${s.end_time}</td>
-                  <td>${s.module_name}</td>
-                  <td>${s.delivery_mode}</td>
-                  <td>${s.verification_status || "—"}</td>
-                </tr>
-              `
-            )
-            .join("")
-        : "<tr><td colspan=\"5\">No slots yet</td></tr>";
-    }
-
-    async function refreshAttendanceSlotSelect() {
-      if (!slotSelect) return;
-      attendanceSlotsForDay = [];
-
-      const universityId = document.getElementById("attendance-university-select")?.value;
-      const lectureDate = document.getElementById("attendance-lecture-date")?.value;
-      const semester = document.getElementById("attendance-semester")?.value;
-      if (!universityId || !lectureDate || !semester) {
-        slotSelect.innerHTML = '<option value="">Select slot</option>';
-        return;
-      }
-      const yearNumber = parsePositiveInt(document.getElementById("attendance-academic-year")?.value);
-      const day = dayOfWeekFromDate(lectureDate);
-      if (!day || !yearNumber) {
-        slotSelect.innerHTML = '<option value="">Select slot</option>';
-        return;
-      }
-
-      const rows = await get(
-        `/attendance/slots?user_id=${currentUser.id}&university_id=${universityId}&semester=${semester}&year_number=${yearNumber}&day_of_week=${encodeURIComponent(
-          day
-        )}`
-      ).catch(() => []);
-      attendanceSlotsForDay = rows;
-      slotSelect.innerHTML = rows.length
-        ? rows
-            .map((s) => {
-              const title = `${s.module_name} | ${s.start_time}-${s.end_time} | ${s.delivery_mode}`;
-              const disabled = s.verification_status !== "auto_verified";
-              return `<option value="${s.id}" ${disabled ? "disabled" : ""}>${title}</option>`;
-            })
-            .join("")
-        : '<option value="">No slots available for this day</option>';
-    }
-
-    if (slotAddForm && !slotAddForm.dataset.bound) {
-      slotAddForm.dataset.bound = "1";
-      slotAddForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const universityId = document.getElementById("attendance-university-select")?.value;
-        if (!universityId) return alert("Select university first.");
-        const day = slotDaySelect?.value || "";
-        const start_time = document.getElementById("attendance-slot-start")?.value || "";
-        const end_time = document.getElementById("attendance-slot-end")?.value || "";
-        const mode = slotModeSelect?.value || "physical";
-        const module_name = document.getElementById("attendance-slot-module-select")?.value || "";
-        const location_text = document.getElementById("attendance-slot-location")?.value || "";
-        const semester = document.getElementById("attendance-slot-semester")?.value || "";
-        const year_number = document.getElementById("attendance-slot-year")?.value || "";
-        const hall_id = mode === "physical" ? slotHallSelect?.value || "" : "";
-
-        if (!day || !start_time || !end_time || !module_name || !semester || !year_number) {
-          return alert("Fill all slot fields correctly.");
-        }
-        const res = await post("/attendance/slots", {
-          user_id: currentUser.id,
-          university_id: universityId,
-          semester,
-          year_number,
-          day_of_week: day,
-          start_time,
-          end_time,
-          module_name,
-          delivery_mode: mode,
-          location_text: location_text || null,
-          hall_id: hall_id || null,
-        });
-        if (res && res.error) return alert(res.error);
-        await refreshSlotsList();
-        await refreshAttendanceSlotSelect();
-      });
-    }
-
-    if (slotSelect && !slotSelect.dataset.bound) {
-      slotSelect.dataset.bound = "1";
-      slotSelect.addEventListener("change", () => {
-        const id = slotSelect.value;
-        const slot = attendanceSlotsForDay.find((s) => String(s.id) === String(id));
-        if (!slot) return;
-
-        const modeSelect = document.getElementById("attendance-delivery-mode");
-        if (modeSelect) {
-          modeSelect.value = slot.delivery_mode === "online" ? "online" : "offline";
-          modeSelect.dispatchEvent(new Event("change"));
-        }
-        const hallSelect = document.getElementById("attendance-hall-select");
-        if (hallSelect) {
-          hallSelect.value = slot.hall_id ? String(slot.hall_id) : "";
-        }
-        const moduleSelect = document.getElementById("attendance-module-select");
-        if (moduleSelect) {
-          moduleSelect.value = slot.module_name || "";
-        }
-      });
-    }
-
-    const lectureDateEl = document.getElementById("attendance-lecture-date");
-    const semesterEl = document.getElementById("attendance-semester");
-    if (lectureDateEl && !lectureDateEl.dataset.bound) {
-      lectureDateEl.dataset.bound = "1";
-      lectureDateEl.addEventListener("change", () => refreshAttendanceSlotSelect());
-    }
-    if (semesterEl && !semesterEl.dataset.bound) {
-      semesterEl.dataset.bound = "1";
-      semesterEl.addEventListener("change", () => refreshAttendanceSlotSelect());
-    }
-    const academicYearEl = document.getElementById("attendance-academic-year");
-    if (academicYearEl && !academicYearEl.dataset.bound) {
-      academicYearEl.dataset.bound = "1";
-      academicYearEl.addEventListener("change", () => refreshAttendanceSlotSelect());
-    }
-    const uniSel = document.getElementById("attendance-university-select");
-    if (uniSel && !uniSel.dataset.boundSlots) {
-      uniSel.dataset.boundSlots = "1";
-      uniSel.addEventListener("change", () => {
-        refreshSlotsList();
-        refreshAttendanceSlotSelect();
-      });
-    }
-
-    // Initial load (if user already selected inputs)
-    refreshSlotsList();
-    refreshAttendanceSlotSelect();
-
-    const addModuleForm = document.getElementById("attendance-add-module-form");
-    if (addModuleForm && !addModuleForm.dataset.bound) {
-      addModuleForm.dataset.bound = "1";
-      addModuleForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const universityId = document.getElementById("attendance-module-university")?.value || "";
-        const academicYear = parsePositiveInt(document.getElementById("attendance-module-academic-year")?.value);
-        const semesterInYear = parsePositiveInt(document.getElementById("attendance-module-semester-in-year")?.value);
-        const name = (document.getElementById("attendance-module-name").value || "").trim();
-        const code = normalizeCode(document.getElementById("attendance-module-code").value || "");
-        if (!universityId) return alert("Select university.");
-        if (!academicYear || !semesterInYear) return alert("Enter academic year and semester.");
-        if (!name || name.length > 255) {
-          alert("Module name is required (1–255 characters)");
+        if (!title || title.length > 500) {
+          alert("Task title is required (1–500 characters)");
           return;
         }
-        if (!code) return alert("Module code is required.");
-        const res = await post("/modules", {
-          user_id: currentUser.id,
-          university_id: universityId,
-          academic_year: academicYear,
-          semester_in_year: semesterInYear,
-          name,
-          code,
-          credits: 3,
-          semester: (academicYear - 1) * 2 + semesterInYear,
-        });
+        if (priority_score < 1 || priority_score > 10) {
+          alert("Priority must be between 1 and 10");
+          return;
+        }
+        const res = await post("/tasks", { user_id: currentUser.id, module_code, title, due_date, priority_score });
         if (res && res.error) {
           alert(res.error);
           return;
         }
-        addModuleForm.reset();
-        loadAttendancePage();
-      });
-    }
-
-    const attForm = document.getElementById("attendance-form");
-    if (attForm) {
-      const modeSelect = document.getElementById("attendance-delivery-mode");
-      const proofGroup = document.getElementById("attendance-online-proof-group");
-      const hallGroup = document.getElementById("attendance-hall-group");
-      const toggleModeUi = () => {
-        const mode = modeSelect?.value || "offline";
-        if (proofGroup) proofGroup.classList.toggle("hidden", mode !== "online");
-        if (hallGroup) hallGroup.classList.toggle("hidden", mode === "online");
-      };
-      if (modeSelect && !modeSelect.dataset.bound) {
-        modeSelect.dataset.bound = "1";
-        modeSelect.addEventListener("change", toggleModeUi);
-        toggleModeUi();
-      }
-
-      attForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const slot_id = document.getElementById("attendance-slot-select")?.value || "";
-        const module_name = document.getElementById("attendance-module-select").value?.trim() || "";
-        const total_sessions = parseInt(document.getElementById("attendance-total").value, 10) || 0;
-        const attended = parseInt(document.getElementById("attendance-attended").value, 10) || 0;
-        const semester = parseInt(document.getElementById("attendance-semester").value, 10) || null;
-        const academic_year = parseInt(document.getElementById("attendance-academic-year").value, 10) || null;
-        const delivery_mode = document.getElementById("attendance-delivery-mode")?.value || "offline";
-        const hall_id = document.getElementById("attendance-hall-select")?.value || "";
-        const lecture_date = document.getElementById("attendance-lecture-date")?.value || "";
-        const proofFile = document.getElementById("attendance-online-proof")?.files?.[0] || null;
-        if (!lecture_date) {
-          alert("Select lecture date.");
-          return;
-        }
-        if (!slot_id) {
-          alert("Select a verified schedule slot.");
-          return;
-        }
-        if (!module_name) {
-          alert("Select a module");
-          return;
-        }
-        if (total_sessions < 0 || attended < 0) {
-          alert("Attended and total sessions must be 0 or greater");
-          return;
-        }
-        if (attended > total_sessions) {
-          alert("Attended cannot exceed total sessions");
-          return;
-        }
-        if (delivery_mode === "offline" && !hall_id) {
-          alert("Select lecture hall for offline attendance.");
-          return;
-        }
-        if (delivery_mode === "online" && !proofFile) {
-          alert("Upload proof for online lecture change.");
-          return;
-        }
-
-        const fd = new FormData();
-        fd.append("user_id", currentUser.id);
-        fd.append("slot_id", slot_id);
-        fd.append("module_name", module_name);
-        fd.append("attended", attended);
-        fd.append("total_sessions", total_sessions);
-        if (semester != null) fd.append("semester", semester);
-        if (academic_year != null) fd.append("academic_year", academic_year);
-        fd.append("delivery_mode", delivery_mode);
-        if (selectedAttendanceUniversityId) fd.append("university_id", selectedAttendanceUniversityId);
-        if (hall_id) fd.append("hall_id", hall_id);
-        if (lecture_date) fd.append("lecture_date", lecture_date);
-        if (proofFile) fd.append("proof", proofFile);
-
-        const resp = await fetch(API + "/attendance/mark", { method: "POST", body: fd, credentials: "include" });
-        const res = await resp.json().catch(() => ({}));
-        if (!resp.ok || (res && res.error)) {
-          alert(res.error || "Attendance mark failed");
-          return;
-        }
-
-        if (res.verification_status === "timetable_missing") {
-          alert("Attendance submitted, but timetable verification failed. Upload your timetable PDF for this semester and wait for admin approval.");
-        } else if (res.verification_status === "pending") {
-          alert("Attendance submitted for admin verification (online lecture proof).");
-        } else if (res.verification_status === "auto_verified") {
-          alert("Attendance marked successfully and verified.");
-        }
-        attForm.reset();
-        toggleModeUi();
-        loadAttendancePage();
-        loadDashboard();
-        trackUsage("attendance_mark", "attendance", { module_name, delivery_mode });
+        form.reset();
+        document.getElementById("task-priority").value = 5;
+        loadTasks();
+        trackUsage("task_add", "tasks", { due_date });
       });
     }
   }
@@ -929,131 +814,425 @@
 
   initRepeatImprovementForm();
   initRepeatAddModuleForm();
+
   // ==============================
-  // Geofence (attendance) – circle based on admin-configured lecture halls
+  // Admin pages
   // ==============================
 
-  function initGeofence() {
-    const checkBtn = document.getElementById("check-geofence-btn");
-    const statusCard = document.getElementById("geofence-status-card");
-    const statusText = document.getElementById("geofence-status-text");
-    const statusDetail = document.getElementById("geofence-status-detail");
-    const markSection = document.getElementById("attendance-mark-section");
-    const outsideMsg = document.getElementById("geofence-outside-msg");
+  function requireAdminOnlyUI() {
+    if (!currentUser || currentUser.role !== "admin") {
+      alert("Admin access only");
+      return false;
+    }
+    return true;
+  }
 
-    if (!checkBtn) return;
-
-    checkBtn.addEventListener("click", async () => {
-      const mode = document.getElementById("attendance-delivery-mode")?.value || "offline";
-      if (mode === "online") {
-        statusCard.classList.remove("outside");
-        statusCard.classList.add("within");
-        statusText.textContent = "Online lecture mode enabled";
-        statusDetail.textContent = "Geofence is not required for online lecture submissions. Upload proof and mark attendance.";
-        if (markSection) markSection.classList.remove("hidden");
-        if (outsideMsg) outsideMsg.classList.add("hidden");
-        return;
-      }
-
-      checkBtn.disabled = true;
-      checkBtn.textContent = "Checking...";
-      statusText.textContent = "Verifying location...";
-        statusDetail.textContent = "Getting your GPS position...";
-      statusCard.classList.remove("within", "outside");
-
-      const domUniId = parseInt(document.getElementById("attendance-university-select")?.value, 10);
-      if (!domUniId || isNaN(domUniId)) {
-        alert("Please select a university first.");
-        checkBtn.disabled = false;
-        checkBtn.textContent = "Check location";
-        statusText.textContent = "Check your location to mark attendance";
-      statusDetail.textContent = "Tap \"Check location\" after selecting a university to verify by GPS";
-        return;
-      }
-
-      selectedAttendanceUniversityId = domUniId;
-      attendanceHalls = await get("/universities/" + domUniId + "/halls").catch(() => []);
-      if (!attendanceHalls || attendanceHalls.length === 0) {
-        alert("No lecture hall geofences configured for this university yet.");
-        checkBtn.disabled = false;
-        checkBtn.textContent = "Check location";
-        statusText.textContent = "Check your location to mark attendance";
-        statusDetail.textContent = "Ask your admin to configure lecture hall circles.";
-        return;
-      }
-
-      const onSuccess = (position) => {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-        const selectedHallId = document.getElementById("attendance-hall-select")?.value || "";
-        const restrictToHall = mode === "offline" && selectedHallId;
-
-        let within = false;
-        let nearestHall = null;
-        let nearestDist = Infinity;
-
-        for (const h of attendanceHalls) {
-          if (restrictToHall && String(h.id) !== String(selectedHallId)) continue;
-          const dist = haversineMeters(lat, lng, parseFloat(h.center_lat), parseFloat(h.center_lng));
-          if (dist <= parseFloat(h.radius_m)) {
-            within = true;
-            if (dist < nearestDist) {
-              nearestDist = dist;
-              nearestHall = h;
-            }
-          }
+  async function loadAdminDashboard() {
+    if (!requireAdminOnlyUI()) return;
+    const [users, unis, hallsTotal, openConcerns] = await Promise.all([
+      get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []),
+      get("/universities").catch(() => []),
+      (async () => {
+        const unisRows = await get("/universities").catch(() => []);
+        let total = 0;
+        for (const u of unisRows) {
+          const hs = await get("/universities/" + u.id + "/halls").catch(() => []);
+          total += hs.length;
         }
+        return total;
+      })(),
+      get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=open").catch(() => []),
+    ]);
+    document.getElementById("admin-total-users").textContent = users.length;
+    document.getElementById("admin-total-universities").textContent = unis.length;
+    document.getElementById("admin-open-concerns").textContent = openConcerns.length;
+    document.getElementById("admin-total-halls").textContent = hallsTotal;
+  }
 
-        statusCard.classList.add(within ? "within" : "outside");
-        statusText.textContent = within ? "Within a lecture hall geofence ✓" : "Outside lecture hall geofences";
-        statusDetail.textContent = within
-          ? `You are inside: ${nearestHall.hall_name}${nearestHall.building_name ? " (" + nearestHall.building_name + ")" : ""}`
-          : "Move within the designated lecture hall area and try again.";
+  async function loadAdminUsers() {
+    if (!requireAdminOnlyUI()) return;
+    const tbody = document.getElementById("admin-users-tbody");
+    if (!tbody) return;
+    const users = await get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []);
+    tbody.innerHTML = users.length
+      ? users
+          .map(
+            (u) => `
+          <tr>
+            <td>${u.name || "—"}</td>
+            <td>${u.email || "—"}</td>
+            <td>${u.index_number || "—"}</td>
+            <td>${u.role || "student"}</td>
+            <td>${u.created_at ? String(u.created_at).slice(0, 10) : "—"}</td>
+            <td>
+              <select data-role-sel="${u.id}" class="admin-role-select">
+                <option value="student" ${u.role === "student" ? "selected" : ""}>student</option>
+                <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
+              </select>
+              <button type="button" class="btn btn-ghost btn-small" data-role-save="${u.id}">Save</button>
+            </td>
+          </tr>
+        `
+          )
+          .join("")
+      : "<tr><td colspan=\"6\">No users</td></tr>";
 
-        if (markSection) markSection.classList.toggle("hidden", !within);
-        if (outsideMsg) outsideMsg.classList.toggle("hidden", within);
-
-        if (within) trackUsage("attendance_geofence_ok", "attendance", { hall_id: nearestHall?.id || null, university_id: selectedAttendanceUniversityId });
-
-        checkBtn.disabled = false;
-        checkBtn.textContent = "Check location";
-      };
-
-      const onError = () => {
-        statusCard.classList.add("outside");
-        statusText.textContent = "Location unavailable";
-        statusDetail.textContent = "Please enable location services and try again.";
-        if (markSection) markSection.classList.add("hidden");
-        if (outsideMsg) outsideMsg.classList.remove("hidden");
-        checkBtn.disabled = false;
-        checkBtn.textContent = "Check location";
-      };
-
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(onSuccess, onError, {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0,
-        });
-      } else {
-        onError();
-      }
+    tbody.querySelectorAll("[data-role-save]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-role-save");
+        const sel = tbody.querySelector('select[data-role-sel="' + id + '"]');
+        const role = sel?.value || "student";
+        const res = await put("/admin/users/" + id + "/role", { admin_user_id: currentUser.id, role });
+        if (res && res.error) alert(res.error);
+        // If the currently logged-in admin promoted/changed their own role,
+        // reload so the UI immediately switches to admin-only options.
+        if (String(id) === String(currentUser.id)) {
+          currentUser.role = role;
+          const nowIsAdmin = currentUser.role === "admin";
+          document.querySelectorAll(".admin-only").forEach((el) => el.classList.toggle("hidden", !nowIsAdmin));
+          document.querySelectorAll(".student-only").forEach((el) => el.classList.toggle("hidden", nowIsAdmin));
+          showPage(nowIsAdmin ? "admin-dashboard" : "dashboard");
+          return;
+        }
+        await loadAdminUsers();
+      });
     });
   }
 
-  initGeofence();
+  async function loadAdminUniversitiesForHalls() {
+    if (!requireAdminOnlyUI()) return;
+    const universities = await loadUniversitiesCache();
+    const select = document.getElementById("admin-university-select-halls");
+    if (select) {
+      select.innerHTML =
+        '<option value="">Select university</option>' +
+        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
+      if (!select.dataset.bound) {
+        select.dataset.bound = "1";
+        select.addEventListener("change", () => loadAdminHallsPage());
+      }
+    }
+    const ttSelect = document.getElementById("admin-university-select-timetable");
+    if (ttSelect) {
+      ttSelect.innerHTML =
+        '<option value="">Select university</option>' +
+        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
+      if (!ttSelect.dataset.bound) {
+        ttSelect.dataset.bound = "1";
+        ttSelect.addEventListener("change", () => loadAdminTimetablePdfs());
+      }
+    }
+  }
 
-  // ==============================
-  // Logout
-  // ==============================
+  async function loadAdminHallsPage() {
+    if (!requireAdminOnlyUI()) return;
+    const tbody = document.getElementById("admin-halls-tbody");
+    if (!tbody) return;
 
-  document.getElementById("logout-btn").addEventListener("click", () => {
-    currentUser = null;
-    post("/logout", {}).catch(() => {});
-    document.getElementById("app").classList.add("hidden");
-    document.getElementById("auth-screen").classList.remove("hidden");
-    document.getElementById("register-screen").classList.add("hidden");
-  });
+    const mapEl = document.getElementById("admin-hall-map");
+    const latInput = document.getElementById("admin-hall-lat");
+    const lngInput = document.getElementById("admin-hall-lng");
+    const radiusInput = document.getElementById("admin-hall-radius");
+    const universityId = document.getElementById("admin-university-select-halls")?.value;
+
+    const syncCircle = () => {
+      if (!adminHallMap || !adminHallMarker || !adminHallCircle) return;
+      const lat = parseFloat(latInput?.value || "6.9271");
+      const lng = parseFloat(lngInput?.value || "79.8612");
+      const radius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
+      if (!isNaN(lat) && !isNaN(lng)) {
+        adminHallMarker.setLatLng([lat, lng]);
+        adminHallCircle.setLatLng([lat, lng]);
+      }
+      if (!isNaN(radius)) adminHallCircle.setRadius(radius);
+    };
+
+    if (mapEl && typeof L !== "undefined" && !adminHallMap) {
+      const initLat = parseFloat(latInput?.value || "6.9271");
+      const initLng = parseFloat(lngInput?.value || "79.8612");
+      const initRadius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
+      adminHallMap = L.map(mapEl).setView([initLat, initLng], 16);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(adminHallMap);
+      adminHallMarker = L.marker([initLat, initLng], { draggable: true }).addTo(adminHallMap);
+      adminHallCircle = L.circle([initLat, initLng], { radius: initRadius, color: "#00c9a7" }).addTo(adminHallMap);
+
+      adminHallMap.on("click", (e) => {
+        if (latInput) latInput.value = e.latlng.lat.toFixed(7);
+        if (lngInput) lngInput.value = e.latlng.lng.toFixed(7);
+        syncCircle();
+      });
+      adminHallMarker.on("dragend", () => {
+        const pos = adminHallMarker.getLatLng();
+        if (latInput) latInput.value = pos.lat.toFixed(7);
+        if (lngInput) lngInput.value = pos.lng.toFixed(7);
+        syncCircle();
+      });
+      if (latInput && !latInput.dataset.mapBound) {
+        latInput.dataset.mapBound = "1";
+        latInput.addEventListener("input", syncCircle);
+      }
+      if (lngInput && !lngInput.dataset.mapBound) {
+        lngInput.dataset.mapBound = "1";
+        lngInput.addEventListener("input", syncCircle);
+      }
+      if (radiusInput && !radiusInput.dataset.mapBound) {
+        radiusInput.dataset.mapBound = "1";
+        radiusInput.addEventListener("input", syncCircle);
+      }
+      setTimeout(() => adminHallMap.invalidateSize(), 50);
+    } else {
+      syncCircle();
+    }
+
+    const form = document.getElementById("admin-add-hall-form");
+    if (form && !form.dataset.bound) {
+      form.dataset.bound = "1";
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const res = await post("/admin/lecture-halls", {
+          admin_user_id: currentUser.id,
+          university_id: document.getElementById("admin-university-select-halls")?.value,
+          hall_name: document.getElementById("admin-hall-name")?.value,
+          building_name: document.getElementById("admin-hall-building")?.value,
+          floor_number: document.getElementById("admin-hall-floor")?.value,
+          center_lat: document.getElementById("admin-hall-lat")?.value,
+          center_lng: document.getElementById("admin-hall-lng")?.value,
+          radius_m: document.getElementById("admin-hall-radius")?.value,
+        });
+        if (res && res.error) return alert(res.error);
+        form.reset();
+        await loadAdminHallsPage();
+      });
+    }
+
+    const uniForm = document.getElementById("admin-add-university-form");
+    if (uniForm && !uniForm.dataset.bound) {
+      uniForm.dataset.bound = "1";
+      uniForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const name = document.getElementById("admin-university-name")?.value || "";
+        const email = document.getElementById("admin-university-email")?.value || "";
+        const res = await post("/admin/universities", {
+          admin_user_id: currentUser.id,
+          name,
+          general_email: email,
+        });
+        if (res && res.error) return alert(res.error);
+        uniForm.reset();
+        universitiesCache = null;
+        await loadAdminUniversitiesForHalls();
+        await loadAdminHallsPage();
+      });
+    }
+
+    if (!universityId) {
+      tbody.innerHTML = "<tr><td colspan=\"7\">Select a university</td></tr>";
+      return;
+    }
+
+    const halls = await get("/universities/" + universityId + "/halls").catch(() => []);
+    tbody.innerHTML = halls.length
+      ? halls
+          .map(
+            (h) => `
+          <tr>
+            <td>${h.hall_name}</td>
+            <td>${h.building_name || "—"}</td>
+            <td>${h.floor_number ?? "—"}</td>
+            <td>${h.center_lat}</td>
+            <td>${h.center_lng}</td>
+            <td>${h.radius_m}</td>
+            <td><button type="button" class="btn btn-ghost btn-small" data-hall-remove="${h.id}">Remove</button></td>
+          </tr>
+        `
+          )
+          .join("")
+      : "<tr><td colspan=\"7\">No halls yet</td></tr>";
+
+    tbody.querySelectorAll("[data-hall-remove]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-hall-remove");
+        const res = await fetch(API + "/admin/lecture-halls/" + id, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ admin_user_id: currentUser.id }),
+          credentials: "include",
+        }).then((r) => r.json());
+        if (res && res.error) return alert(res.error);
+        await loadAdminHallsPage();
+      });
+    });
+  }
+
+  async function loadAdminTimetablePdfs() {
+    if (!requireAdminOnlyUI()) return;
+    const tbody = document.getElementById("admin-timetable-list-tbody");
+    if (!tbody) return;
+    const uni = document.getElementById("admin-university-select-timetable")?.value;
+    const url = uni
+      ? "/admin/timetable-pdfs?admin_user_id=" + currentUser.id + "&university_id=" + uni
+      : "/admin/timetable-pdfs?admin_user_id=" + currentUser.id;
+    const rows = await get(url).catch(() => []);
+    tbody.innerHTML = rows.length
+      ? rows
+          .map(
+            (r) => `
+          <tr>
+            <td>${r.semester}</td>
+            <td><a href="/uploads/${String(r.file_path).split(/[\\\\/]/).pop()}" target="_blank">Open PDF</a></td>
+            <td>${r.created_at ? String(r.created_at).slice(0, 10) : "—"}</td>
+          </tr>
+        `
+          )
+          .join("")
+      : "<tr><td colspan=\"3\">No uploads yet</td></tr>";
+
+    const form = document.getElementById("admin-timetable-upload-form");
+    if (form && !form.dataset.bound) {
+      form.dataset.bound = "1";
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const uid = document.getElementById("admin-university-select-timetable")?.value;
+        const semester = document.getElementById("admin-timetable-semester")?.value || "";
+        const fileInput = document.getElementById("admin-timetable-file");
+        const file = fileInput?.files?.[0];
+        if (!uid) return alert("Select a university");
+        if (!semester) return alert("Enter semester");
+        if (!file) return alert("Select a PDF file");
+
+        const fd = new FormData();
+        fd.append("admin_user_id", currentUser.id);
+        fd.append("university_id", uid);
+        fd.append("semester", semester);
+        fd.append("file", file);
+
+        const resp = await fetch(API + "/admin/timetable-pdfs", { method: "POST", body: fd, credentials: "include" });
+        const json = await resp.json().catch(() => ({}));
+        if (!resp.ok || json.error) return alert(json.error || "Upload failed");
+        form.reset();
+        await loadAdminTimetablePdfs();
+      });
+    }
+  }
+
+  async function loadAdminConcerns() {
+    if (!requireAdminOnlyUI()) return;
+    const tbody = document.getElementById("admin-concerns-tbody");
+    if (!tbody) return;
+    const status = document.getElementById("admin-concerns-status")?.value || "open";
+    const rows = await get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=" + status).catch(() => []);
+    tbody.innerHTML = rows.length
+      ? rows
+          .map(
+            (c) => `
+          <tr>
+            <td>${c.student_name || "—"}</td>
+            <td>${c.university_name || "—"}</td>
+            <td>${c.category || "—"}</td>
+            <td>${c.status || "—"}</td>
+            <td>${(c.message || "").slice(0, 220)}${(c.message || "").length > 220 ? "..." : ""}</td>
+            <td>
+              ${
+                c.status === "forwarded"
+                  ? "—"
+                  : `<button type="button" class="btn btn-ghost btn-small" data-forward="${c.id}">Forward</button>`
+              }
+            </td>
+          </tr>
+        `
+          )
+          .join("")
+      : "<tr><td colspan=\"6\">No concerns</td></tr>";
+
+    tbody.querySelectorAll("[data-forward]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-forward");
+        const res = await post("/admin/concerns/" + id + "/forward", { admin_user_id: currentUser.id });
+        if (res && res.error) return alert(res.error);
+        await loadAdminConcerns();
+      });
+    });
+
+    const refreshBtn = document.getElementById("admin-refresh-concerns-btn");
+    if (refreshBtn && !refreshBtn.dataset.bound) {
+      refreshBtn.dataset.bound = "1";
+      refreshBtn.addEventListener("click", () => loadAdminConcerns());
+    }
+    const statusSelect = document.getElementById("admin-concerns-status");
+    if (statusSelect && !statusSelect.dataset.bound) {
+      statusSelect.dataset.bound = "1";
+      statusSelect.addEventListener("change", () => loadAdminConcerns());
+    }
+  }
+
+  async function loadAdminUsage() {
+    if (!requireAdminOnlyUI()) return;
+    const days = 7;
+    const summary = await get("/admin/analytics/usage-summary?admin_user_id=" + currentUser.id + "&days=" + days).catch(() => null);
+    if (!summary) return;
+    const rows = summary.rows || [];
+
+    const total = rows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    document.getElementById("admin-total-events").textContent = total;
+
+    // page_view + task_add split
+    const pageViewRows = rows.filter((r) => r.event_type === "page_view");
+    const taskAddRows = rows.filter((r) => r.event_type === "task_add");
+    const pageViews = pageViewRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    const taskAdds = taskAddRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    document.getElementById("admin-total-page-views").textContent = pageViews;
+    document.getElementById("admin-total-task-adds").textContent = taskAdds;
+
+    const taskCompleteRows = rows.filter((r) => r.event_type === "task_complete");
+    const taskCompletes = taskCompleteRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    document.getElementById("admin-total-task-completes").textContent = taskCompletes;
+
+    const attendanceRows = rows.filter((r) => r.event_type === "attendance_mark");
+    const attendanceMarks = attendanceRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    document.getElementById("admin-total-attendance-marks").textContent = attendanceMarks;
+
+    const concernRows = rows.filter((r) => r.event_type === "concern_submit");
+    const concernSubmits = concernRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
+    document.getElementById("admin-total-concerns-submits").textContent = concernSubmits;
+
+    const daysArr = Array.from(new Set(rows.map((r) => r.day))).sort();
+    const pageByDay = daysArr.map((d) =>
+      rows.filter((r) => r.day === d && r.event_type === "page_view").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
+    );
+    const taskByDay = daysArr.map((d) =>
+      rows.filter((r) => r.day === d && r.event_type === "task_add").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
+    );
+
+    const ctx = document.getElementById("admin-usage-chart");
+    if (ctx) {
+      if (adminUsageChart) adminUsageChart.destroy();
+      adminUsageChart = new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels: daysArr,
+          datasets: [
+            { label: "Page views", data: pageByDay, backgroundColor: "#00c9a7" },
+            { label: "Task adds", data: taskByDay, backgroundColor: "#f59e0b" },
+          ],
+        },
+        options: { responsive: true, maintainAspectRatio: true },
+      });
+    }
+
+    const exportBtn = document.getElementById("admin-export-usage-excel");
+    if (exportBtn && !exportBtn.dataset.bound) {
+      exportBtn.dataset.bound = "1";
+      exportBtn.addEventListener("click", () => {
+        window.open(
+          API + "/admin/analytics/usage-export-excel?admin_user_id=" + currentUser.id + "&days=" + days,
+          "_blank"
+        );
+      });
+    }
+  }
+
 
   // ==============================
   // Auth form listeners

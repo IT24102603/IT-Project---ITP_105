@@ -623,12 +623,12 @@ app.get("/users/:id/gpa", async (req, res) => {
 });
 
 // ============================
-// Attendance
+// Tasks
 // ============================
 
-app.get("/users/:id/attendance", async (req, res) => {
+app.get("/users/:id/tasks", async (req, res) => {
   try {
-    const rows = await query("SELECT * FROM attendance WHERE user_id=?", [
+    const rows = await query("SELECT * FROM tasks WHERE user_id=? ORDER BY due_date ASC, priority_score DESC", [
       req.params.id,
     ]);
     res.json(rows);
@@ -637,440 +637,53 @@ app.get("/users/:id/attendance", async (req, res) => {
   }
 });
 
-app.get("/users/:id/attendance-logs", async (req, res) => {
+//VALIDATION TASK
+app.post("/tasks", async (req, res) => {
   try {
-    const rows = await query(
-      `SELECT
-         l.id,
-         l.user_id,
-         l.module_name,
-         l.semester,
-         l.attended,
-         l.total_sessions,
-         l.lecture_date,
-         l.delivery_mode,
-         l.university_id,
-         l.hall_id,
-         l.proof_path,
-         l.verification_status,
-         l.created_at,
-         u.name AS student_name,
-         un.name AS university_name,
-         lh.hall_name
-       FROM attendance_logs l
-       LEFT JOIN users u ON u.id=l.user_id
-       LEFT JOIN universities un ON un.id=l.university_id
-       LEFT JOIN lecture_halls lh ON lh.id=l.hall_id
-       WHERE l.user_id=?
-         AND l.verification_status IN ('auto_verified','approved')
-       ORDER BY l.lecture_date DESC, l.created_at DESC`,
-      [req.params.id]
-    );
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.post("/attendance", async (req, res) => {
-  try {
-    const { user_id, module_name, attended, total_sessions, semester } =
-      req.body;
+    const { user_id, module_code, title, due_date, priority_score } = req.body;
     if (!user_id) return res.status(400).json({ error: "User ID is required" });
-    const mn = typeof module_name === "string" ? module_name.trim() : "";
-    if (!mn || mn.length > 255) return res.status(400).json({ error: "Module name is required (1–255 characters)" });
-    const att = parseInt(attended, 10) || 0;
-    const tot = parseInt(total_sessions, 10) || 0;
-    if (att < 0 || tot < 0) return res.status(400).json({ error: "Attended and total sessions must be 0 or greater" });
-    if (att > tot) return res.status(400).json({ error: "Attended cannot exceed total sessions" });
+    const mc = module_code != null ? String(module_code).trim().slice(0, 50).toUpperCase() : null;
+    const t = typeof title === "string" ? title.trim() : "";
+    if (!t || t.length > 500) return res.status(400).json({ error: "Task title is required (1–500 characters)" });
+    const prio = parseInt(priority_score, 10) || 5;
+    if (prio < 1 || prio > 10) return res.status(400).json({ error: "Priority must be between 1 and 10" });
+    let due = null;
+    if (due_date) {
+      const d = new Date(due_date);
+      if (!isNaN(d.getTime())) due = due_date;
+    }
     const sql = `
-      INSERT INTO attendance
-      (user_id, module_name, attended, total_sessions, semester)
+      INSERT INTO tasks (user_id, module_code, title, due_date, priority_score)
       VALUES (?, ?, ?, ?, ?)
     `;
-    const [result] = await db.query(sql, [
-      user_id,
-      mn,
-      att,
-      tot,
-      semester != null ? parseInt(semester, 10) || null : null,
-    ]);
+
+    //ERROR HANDLING TASK
+    const [result] = await db.query(sql, [user_id, mc, t, due, prio]);
     res.json({ id: result.insertId });
   } catch (err) {
-    res.json({ error: "Attendance insert failed" });
+    res.json({ error: "Task insert failed" });
   }
 });
 
-// Rich attendance mark with timetable/proof verification
-app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) => {
+app.patch("/tasks/:id", async (req, res) => {
   try {
-    const body = req.body || {};
-    const slot_id = body.slot_id;
-    const user_id = body.user_id;
-    let module_name = body.module_name;
-    const attended = body.attended;
-    const total_sessions = body.total_sessions;
-    let semester = body.semester;
-    let delivery_mode = body.delivery_mode;
-    let university_id = body.university_id;
-    let hall_id = body.hall_id;
-    const academic_year = body.academic_year;
-    const lecture_date = body.lecture_date;
-
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-    const uid = parseInt(user_id, 10);
-    let mn = typeof module_name === "string" ? module_name.trim() : "";
-    if (slot_id) {
-      const sid = parseInt(slot_id, 10);
-      if (isNaN(sid)) return res.status(400).json({ error: "slot_id is invalid" });
-      const slotRows = await query(
-        "SELECT * FROM schedule_slots WHERE id=? AND user_id=?",
-        [sid, uid]
-      );
-      const slot = slotRows[0];
-      if (!slot) return res.status(404).json({ error: "Schedule slot not found" });
-      mn = slot.module_name;
-      delivery_mode = slot.delivery_mode;
-      university_id = slot.university_id;
-      hall_id = slot.hall_id;
-      semester = slot.semester;
-    }
-
-    if (!mn || mn.length > 255) return res.status(400).json({ error: "Module name is required (1-255 characters)" });
-
-    const sem = semester != null ? parseInt(semester, 10) : null;
-    const att = parseInt(attended, 10) || 0;
-    const tot = parseInt(total_sessions, 10) || 0;
-    if (att < 0 || tot < 0) return res.status(400).json({ error: "Attended and total sessions must be 0 or greater" });
-    if (att > tot) return res.status(400).json({ error: "Attended cannot exceed total sessions" });
-
-    const mode = delivery_mode === "online" ? "online" : "offline";
-    const uniId = university_id ? parseInt(university_id, 10) : null;
-    const hallId = hall_id ? parseInt(hall_id, 10) : null;
-    const dateVal = lecture_date ? String(lecture_date).slice(0, 10) : null;
-    const yearNumber = academic_year != null ? parseInt(academic_year, 10) : null;
-
-    let verificationStatus = "pending";
-    let proofPath = null;
-
-    // Offline auto-verify only when hall is valid and a student timetable exists for that semester+university.
-    if (mode === "offline") {
-      if (!uniId || !hallId || !sem) {
-        return res.status(400).json({ error: "Offline attendance requires university, hall and semester" });
-      }
-      if (yearNumber == null || isNaN(yearNumber) || yearNumber < 1 || yearNumber > 10) {
-        return res.status(400).json({ error: "Offline attendance requires academic_year (1-10)" });
-      }
-      const halls = await query("SELECT id FROM lecture_halls WHERE id=? AND university_id=?", [hallId, uniId]);
-      if (!halls.length) return res.status(400).json({ error: "Selected hall does not belong to the selected university" });
-
-      const timetableRows = await query(
-        "SELECT id FROM timetable_pdfs WHERE uploaded_by_user_id=? AND university_id=? AND semester=? AND year_number=? ORDER BY created_at DESC LIMIT 1",
-        [uid, uniId, String(sem), yearNumber]
-      );
-      verificationStatus = timetableRows.length ? "auto_verified" : "timetable_missing";
-    } else {
-      // Online lecture: proof is mandatory (pdf/image)
-      if (!uniId || !sem) {
-        return res.status(400).json({ error: "Online attendance requires university and semester" });
-      }
-      if (!req.file) return res.status(400).json({ error: "Proof upload is required for online lecture mode" });
-      const allowed = ["application/pdf"];
-      if (!allowed.includes(req.file.mimetype)) {
-        return res.status(400).json({ error: "Proof must be PDF" });
-      }
-      proofPath = req.file.path;
-      // Presence-based: verify timetable exists for semester+academic year.
-      const lectureYear = yearNumber;
-      if (lectureYear == null || isNaN(lectureYear) || lectureYear < 1 || lectureYear > 10) {
-        return res.status(400).json({ error: "Online attendance requires academic_year (1-10)" });
-      }
-      const timetableRows = await query(
-        "SELECT id FROM timetable_pdfs WHERE uploaded_by_user_id=? AND university_id=? AND semester=? AND year_number=? ORDER BY created_at DESC LIMIT 1",
-        [uid, uniId, String(sem), lectureYear]
-      );
-      verificationStatus = timetableRows.length ? "auto_verified" : "timetable_missing";
-    }
-
-    const [logInsert] = await db.query(
-      `INSERT INTO attendance_logs
-       (user_id, module_name, semester, attended, total_sessions, lecture_date, delivery_mode, university_id, hall_id, proof_path, verification_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uid,
-        mn,
-        sem || null,
-        att,
-        tot,
-        dateVal || null,
-        mode,
-        uniId || null,
-        hallId || null,
-        proofPath,
-        verificationStatus,
-      ]
-    );
-//attendance validation
-    let attendanceInserted = false;
-    if (verificationStatus === "auto_verified") {
-      await db.query(
-        `INSERT INTO attendance (user_id, module_name, attended, total_sessions, semester)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uid, mn, att, tot, sem || null]
-      );
-      attendanceInserted = true;
-    }
-
-    res.json({
-      success: true,
-      log_id: logInsert.insertId,
-      verification_status: verificationStatus,
-      attendance_inserted: attendanceInserted,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Attendance mark failed" });
-  }
-});
-
-// ============================
-// Admin: Attendance verification queue
-// ============================
-
-app.get("/admin/attendance-queue", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const status = req.query.status ? String(req.query.status).trim() : "";
-    const allowed = ["pending", "timetable_missing", "approved", "rejected", "auto_verified", ""];
-    const effectiveStatus = allowed.includes(status) ? status : "";
-
-    const whereClause = effectiveStatus
-      ? "WHERE l.verification_status=?"
-      : "WHERE l.verification_status IN ('pending','timetable_missing')";
-
-    const params = effectiveStatus ? [effectiveStatus] : [];
-
-    const rows = await query(
-      `SELECT
-          l.id,
-          l.user_id,
-          u.name AS student_name,
-          l.module_name,
-          l.semester,
-          l.attended,
-          l.total_sessions,
-          l.lecture_date,
-          l.delivery_mode,
-          l.verification_status,
-          l.proof_path,
-          un.name AS university_name,
-          lh.hall_name,
-          lh.building_name,
-          lh.floor_number,
-          tp.file_path AS latest_student_timetable_path
-        FROM attendance_logs l
-        JOIN users u ON u.id=l.user_id
-        LEFT JOIN universities un ON un.id=l.university_id
-        LEFT JOIN lecture_halls lh ON lh.id=l.hall_id
-        LEFT JOIN timetable_pdfs tp ON tp.id=(
-          SELECT t2.id
-          FROM timetable_pdfs t2
-          WHERE t2.uploaded_by_user_id=l.user_id
-            AND t2.university_id=l.university_id
-            AND t2.semester=l.semester
-            AND t2.year_number=YEAR(l.lecture_date)
-          ORDER BY t2.created_at DESC
-          LIMIT 1
-        )
-        ${whereClause}
-        ORDER BY l.created_at DESC
-        LIMIT 500`,
-      params
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.post("/admin/attendance-queue/:id/approve", async (req, res) => {
-  try {
-    const adminUserId = req.body?.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const logId = parseInt(req.params.id, 10);
-    if (isNaN(logId)) return res.status(400).json({ error: "Invalid log id" });
-
-    const logs = await query("SELECT * FROM attendance_logs WHERE id=?", [logId]);
-    const log = logs[0];
-    if (!log) return res.status(404).json({ error: "Attendance log not found" });
-    if (log.verification_status === "approved") return res.json({ success: true, skipped: true });
-    if (log.verification_status === "rejected") return res.status(400).json({ error: "Cannot approve rejected log" });
-
-    await query("UPDATE attendance_logs SET verification_status='approved' WHERE id=?", [logId]);
-
-    await query(
-      `INSERT INTO attendance (user_id, module_name, attended, total_sessions, semester)
-       VALUES (?, ?, ?, ?, ?)`,
-      [log.user_id, log.module_name, log.attended, log.total_sessions, log.semester]
-    );
-
+    const { completed } = req.body;
+    await query("UPDATE tasks SET completed=? WHERE id=?", [
+      completed ? 1 : 0,
+      req.params.id,
+    ]);
     res.json({ success: true });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Approve failed" });
+    res.json({ error: "Update failed" });
   }
 });
 
-app.post("/admin/attendance-queue/:id/reject", async (req, res) => {
+app.delete("/tasks/:id", async (req, res) => {
   try {
-    const adminUserId = req.body?.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const logId = parseInt(req.params.id, 10);
-    if (isNaN(logId)) return res.status(400).json({ error: "Invalid log id" });
-
-    const logs = await query("SELECT * FROM attendance_logs WHERE id=?", [logId]);
-    const log = logs[0];
-    if (!log) return res.status(404).json({ error: "Attendance log not found" });
-    if (log.verification_status === "rejected") return res.json({ success: true, skipped: true });
-
-    await query("UPDATE attendance_logs SET verification_status='rejected' WHERE id=?", [logId]);
+    await query("DELETE FROM tasks WHERE id=?", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Reject failed" });
-  }
-});
-
-// ============================
-// Student: day-wise schedule slots
-// Presence-based verification vs uploaded timetable
-// ============================
-
-app.post("/attendance/slots", async (req, res) => {
-  try {
-    const {
-      user_id,
-      university_id,
-      semester,
-      year_number,
-      day_of_week,
-      start_time,
-      end_time,
-      module_name,
-      delivery_mode,
-      location_text,
-      hall_id,
-    } = req.body || {};
-
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-    const uid = parseInt(user_id, 10);
-    const uniId = university_id ? parseInt(university_id, 10) : null;
-    const sem = semester != null ? parseInt(semester, 10) : null;
-    const yn = year_number != null ? parseInt(year_number, 10) : null;
-    const day = typeof day_of_week === "string" ? day_of_week.trim() : "";
-    const st = typeof start_time === "string" ? start_time.trim() : "";
-    const et = typeof end_time === "string" ? end_time.trim() : "";
-    let mn = typeof module_name === "string" ? module_name.trim() : "";
-    let mode = delivery_mode === "online" ? "online" : "physical";
-    const loc = location_text ? String(location_text).slice(0, 255) : null;
-    const hallId = hall_id ? parseInt(hall_id, 10) : null;
-
-    //ERROR HANDLING
-    if (!uniId || isNaN(uniId)) return res.status(400).json({ error: "university_id is invalid" });
-    if (!sem || isNaN(sem)) return res.status(400).json({ error: "semester is invalid" });
-    if (!yn || isNaN(yn) || yn < 1 || yn > 10) return res.status(400).json({ error: "academic year is invalid" });
-    if (!day || day.length > 15) return res.status(400).json({ error: "day_of_week is required" });
-    if (!st || !et) return res.status(400).json({ error: "start_time and end_time are required" });
-    if (!mn || mn.length > 255) return res.status(400).json({ error: "module_name is required" });
-
-    if (mode === "physical" && hallId) {
-      const hallRows = await query("SELECT id FROM lecture_halls WHERE id=? AND university_id=?", [hallId, uniId]);
-      if (!hallRows.length) return res.status(400).json({ error: "hall_id does not belong to selected university" });
-    }
-    // physical slots can be created with either hall_id or free-text location
-
-    // Presence-based verification: timetable exists for that university+semester+year for this student.
-    const timetableRows = await query(
-      "SELECT id FROM timetable_pdfs WHERE uploaded_by_user_id=? AND university_id=? AND semester=? AND year_number=? ORDER BY created_at DESC LIMIT 1",
-      [uid, uniId, String(sem), yn]
-    );
-    const verificationStatus = timetableRows.length ? "auto_verified" : "timetable_missing";
-
-    const [result] = await db.query(
-      `INSERT INTO schedule_slots
-        (user_id, university_id, semester, year_number, day_of_week, start_time, end_time, module_name, delivery_mode, location_text, hall_id, verification_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uid, uniId, sem, yn, day, st, et, mn, mode, loc, hallId || null, verificationStatus]
-    );
-
-    res.json({ success: true, slot_id: result.insertId, verification_status: verificationStatus });
-  } catch (err) {
-    res.status(500).json({ error: "Slot insert failed" });
-  }
-});
-
-app.get("/attendance/slots", async (req, res) => {
-  try {
-    const { user_id, university_id, semester, year_number, day_of_week } = req.query || {};
-    const uid = user_id ? parseInt(user_id, 10) : null;
-    const uniId = university_id ? parseInt(university_id, 10) : null;
-    const sem = semester != null ? parseInt(semester, 10) : null;
-    const yn = year_number != null ? parseInt(year_number, 10) : null;
-    const day = typeof day_of_week === "string" ? day_of_week.trim() : "";
-
-    if (!uid || isNaN(uid)) return res.status(400).json({ error: "user_id is required" });
-    if (!uniId || isNaN(uniId)) return res.status(400).json({ error: "university_id is invalid" });
-    if (!sem || isNaN(sem)) return res.status(400).json({ error: "semester is invalid" });
-    if (!yn || isNaN(yn)) return res.status(400).json({ error: "year_number is invalid" });
-
-    const sql = day
-      ? `SELECT
-           id, day_of_week, start_time, end_time, module_name, delivery_mode,
-           location_text, hall_id, verification_status, created_at
-         FROM schedule_slots
-         WHERE user_id=? AND university_id=? AND semester=? AND year_number=? AND day_of_week=?
-         ORDER BY start_time ASC`
-      : `SELECT
-           id, day_of_week, start_time, end_time, module_name, delivery_mode,
-           location_text, hall_id, verification_status, created_at
-         FROM schedule_slots
-         WHERE user_id=? AND university_id=? AND semester=? AND year_number=?
-         ORDER BY day_of_week ASC, start_time ASC`;
-
-    const params = day ? [uid, uniId, sem, yn, day] : [uid, uniId, sem, yn];
-    const rows = await query(sql, params);
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: "Slots fetch failed" });
-  }
-});
-
-// ============================
-// Universities & lecture halls (circle geofence)
-// ============================
-
-app.get("/universities", async (req, res) => {
-  try {
-    const rows = await query("SELECT id, name, general_email FROM universities ORDER BY name ASC");
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get("/universities/:id/halls", async (req, res) => {
-  try {
-    const halls = await query(
-      "SELECT id, hall_name, building_name, floor_number, center_lat, center_lng, radius_m FROM lecture_halls WHERE university_id=? ORDER BY floor_number ASC, building_name ASC, hall_name ASC",
-      [req.params.id]
-    );
-    res.json(halls);
-  } catch (err) {
-    res.json([]);
+    res.json({ error: "Delete failed" });
   }
 });
 
