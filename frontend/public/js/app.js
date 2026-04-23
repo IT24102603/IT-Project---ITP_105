@@ -340,25 +340,47 @@
     });
   }
 
-    // Notification (deadline alerts) prefs
-    const notifyCheckbox = document.getElementById("notify-deadlines-checkbox");
-    const reminderDaysSelect = document.getElementById("deadline-reminder-days");
-    const saveNotifBtn = document.getElementById("save-notification-prefs");
-    if (notifyCheckbox) notifyCheckbox.checked = profile.notify_deadlines !== false && currentUser.notify_deadlines !== false;
-    if (reminderDaysSelect) reminderDaysSelect.value = String(profile.deadline_reminder_days || currentUser.deadline_reminder_days || 3);
-    if (saveNotifBtn) {
-      saveNotifBtn.onclick = async () => {
-        const enabled = notifyCheckbox ? notifyCheckbox.checked : true;
-        const days = reminderDaysSelect ? parseInt(reminderDaysSelect.value, 10) : 3;
-        if (enabled && "Notification" in window && Notification.permission === "default") {
-          await Notification.requestPermission();
-        }
-        await put("/users/" + currentUser.id + "/profile", { notify_deadlines: enabled, deadline_reminder_days: days });
-        currentUser.notify_deadlines = enabled;
-        currentUser.deadline_reminder_days = days;
-        showDeadlinePrefsSaved();
-      };
+  // ==============================
+  // Dashboard (Profile + Report + Goals + GPA)
+  // ==============================
+
+  async function loadDashboard() {
+    if (!currentUser) return;
+
+    const [gpaData, profile, timetables] = await Promise.all([
+      get("/users/" + currentUser.id + "/gpa"),
+      get("/users/" + currentUser.id + "/profile").catch(() => currentUser),
+      get("/users/" + currentUser.id + "/timetables").catch(() => []),
+    ]);
+
+    const cgpa = gpaData.overall?.gpa ?? 0;
+    const modulesAll = gpaData.modules || [];
+    const currentSemester = Math.max(
+      1,
+      ...modulesAll.map((m) => {
+        const s = parseInt(m.semester, 10);
+        return isNaN(s) ? 1 : s;
+      })
+    );
+    const currentSemesterModules = modulesAll.filter((m) => (parseInt(m.semester, 10) || 1) === currentSemester);
+    const moduleCount = currentSemesterModules.length;
+    const targetGpa = profile.target_gpa != null ? profile.target_gpa : "–";
+    const targetAtt = profile.target_attendance != null ? profile.target_attendance : 80;
+
+    document.getElementById("dashboard-name").textContent = profile.name || currentUser.name || "Student";
+    document.getElementById("dashboard-index").textContent = profile.index_number ? "Index: " + profile.index_number : "–";
+    document.getElementById("dashboard-email").textContent = profile.email || currentUser.email || "–";
+
+    const picEl = document.getElementById("profile-pic");
+    if (picEl && (profile.profile_pic || currentUser.profile_pic)) {
+      picEl.src = profile.profile_pic || currentUser.profile_pic;
     }
+
+    document.getElementById("dashboard-current-gpa").textContent = cgpa;
+    document.getElementById("dashboard-target-gpa").textContent = targetGpa;
+    document.getElementById("dashboard-target-attendance").textContent = targetAtt + "%";
+    document.getElementById("dashboard-module-count").textContent = moduleCount;
+
 
     // Goals edit
     const editBtn = document.getElementById("edit-goals-btn");
@@ -421,227 +443,350 @@
       });
     }
 
-    // Dashboard attendance chart (from attendance logs: includes delivery_mode)
-    const attData = await get("/users/" + currentUser.id + "/attendance-logs").catch(() => []);
-    const attLabels = attData.map((a) => `${a.module_name}${a.delivery_mode === "online" ? " (Online)" : " (Physical)"}`);
-    const attValues = attData.map((a) => Math.round((a.attended / (a.total_sessions || 1)) * 100));
-    const dashAttCtx = document.getElementById("dashboard-attendanceChart");
-    if (dashAttCtx) {
-      if (dashboardAttendanceChart) dashboardAttendanceChart.destroy();
-      dashboardAttendanceChart = new Chart(dashAttCtx, {
-        type: "bar",
-        data: {
-          labels: attLabels,
-          datasets: [
-            {
-              label: "Attendance %",
-              data: attValues,
-              backgroundColor: attData.map((a) => (a.delivery_mode === "online" ? "rgba(59,130,246,0.6)" : "rgba(0,201,167,0.6)")),
-            },
-          ],
-        },
-        options: { responsive: true, maintainAspectRatio: true },
-      });
-    }
-
-    // Dashboard repeat chart (pie)
-    const modules = gpaData.modules || [];
-    const repeatCount = modules.filter((m) => m.is_repeat).length;
-    const normalCount = modules.length - repeatCount;
-    const dashRepeatCtx = document.getElementById("dashboard-repeatChart");
-    if (dashRepeatCtx) {
-      if (dashboardRepeatChart) dashboardRepeatChart.destroy();
-      dashboardRepeatChart = new Chart(dashRepeatCtx, {
-        type: "pie",
-        data: {
-          labels: ["Normal", "Repeat"],
-          datasets: [{ data: [normalCount, repeatCount], backgroundColor: ["#00c9a7", "#f59e0b"] }],
-        },
-        options: { responsive: true, maintainAspectRatio: true },
-      });
-    }
-
-    // Recent modules table
-    const tbody = document.getElementById("dashboard-modules");
-    const recent = currentSemesterModules.slice(-10).reverse();
-    tbody.innerHTML = recent.length
-      ? recent
-          .map(
-            (m) =>
-              `<tr><td>${m.name}</td><td>${m.credits}</td><td>${m.grade_letter || "–"}</td><td>${m.semester || 1}</td></tr>`
-          )
-          .join("")
-      : "<tr><td colspan=\"4\">No modules yet</td></tr>";
-
-    // Timetables table
-    const ttBody = document.getElementById("dashboard-timetables-tbody");
-    if (ttBody) {
-      const rows = timetables || [];
-      ttBody.innerHTML = rows.length
-        ? rows
-            .map((t) => {
-              const fileName = t.file_path ? String(t.file_path).split(/[\\\\/]/).pop() : "";
-              const fileUrl = fileName ? "/uploads/" + fileName : null;
-              return `
-                <tr>
-                  <td>${t.university_name || "—"}</td>
-                  <td>${t.semester || "—"}</td>
-                  <td>${t.academic_year || t.year_number || "—"}</td>
-                  <td>${fileUrl ? `<a href="${fileUrl}" target="_blank">View PDF</a> | <a href="${fileUrl}" target="_blank" download>Download</a>` : "—"}</td>
-                  <td>${t.created_at ? String(t.created_at).slice(0, 10) : "—"}</td>
-                </tr>
-              `;
-            })
-            .join("")
-        : "<tr><td colspan=\"5\">No timetable uploads yet</td></tr>";
-    }
-  }
-  
-
   // ==============================
-  // Task Planner (chart: target vs current)
+  // GPA Calculator + Goal Planner
   // ==============================
 
-  async function loadTasks() {
+  async function loadGpaPage() {
     if (!currentUser) return;
-    const [tasks, modules] = await Promise.all([
-      get("/users/" + currentUser.id + "/tasks"),
-      get("/users/" + currentUser.id + "/modules"),
+    const [gpaData, universities] = await Promise.all([
+      get("/users/" + currentUser.id + "/gpa"),
+      get("/universities").catch(() => []),
     ]);
-    const moduleByCode = new Map((modules || []).map((m) => [normalizeCode(m.code), m]));
-    tasks.sort((a, b) => {
-      const pa = parseInt(a.priority_score, 10) || 0;
-      const pb = parseInt(b.priority_score, 10) || 0;
-      if (pa !== pb) return pb - pa; // highest priority first
-      const da = a.due_date ? String(a.due_date) : "9999-12-31";
-      const db = b.due_date ? String(b.due_date) : "9999-12-31";
-      return da < db ? -1 : da > db ? 1 : 0;
-    });
+    const modules = gpaData.modules || [];
+    const semesters = gpaData.semesters || [];
 
-    const listEl = document.getElementById("tasks-list");
-    if (!tasks.length) {
-      listEl.innerHTML = '<p class="empty-state">No tasks yet. Add one above.</p>';
-    } else {
-      const grouped = {};
-      tasks.forEach((t) => {
-        const mod = moduleByCode.get(normalizeCode(t.module_code));
-        const credits = mod?.credits || 0;
-        const key = credits > 0 ? `${credits} Credits` : "Unassigned / Unknown Credits";
-        if (!grouped[key]) grouped[key] = [];
-        grouped[key].push(t);
-      });
-      const sortedGroups = Object.keys(grouped).sort((a, b) => {
-        const na = parseInt(a, 10) || 0;
-        const nb = parseInt(b, 10) || 0;
-        return nb - na;
-      });
-      listEl.innerHTML = sortedGroups
-        .map((groupName) => {
-          const rows = grouped[groupName];
-          return `
-            <div class="card" style="margin-bottom:0.75rem;">
-              <h3 style="margin-bottom:0.5rem;">${groupName}</h3>
-              ${rows
-                .map(
-                  (t) => `
-                  <div style="margin-bottom:0.5rem; display:flex; align-items:center; justify-content:space-between;">
-                    <div>
-                      <span style="text-decoration:${t.completed ? "line-through" : "none"}">${t.title}</span>
-                      <span class="text-muted">${t.module_code ? " | " + t.module_code : ""}</span>
-                      ${t.due_date ? `<span class="text-muted">Due: ${t.due_date}</span>` : ""}
-                      <span class="badge badge-${t.priority_score >= 8 ? "high" : t.priority_score >= 5 ? "medium" : "low"}">P${t.priority_score}</span>
-                    </div>
-                    <div class="actions">
-                      <button type="button" class="btn btn-ghost btn-small" data-task-toggle="${t.id}" data-completed="${t.completed}">${t.completed ? "Undo" : "Complete"}</button>
-                      <button type="button" class="btn btn-ghost btn-small" data-task-delete="${t.id}">Delete</button>
-                    </div>
-                  </div>`
-                )
-                .join("")}
+    const cards = document.getElementById("gpa-summary-cards");
+    const cgpa = gpaData.overall?.gpa ?? 0;
+    const totalCredits = gpaData.overall?.credits ?? 0;
+    cards.innerHTML = `
+      <div class="card"><div class="label">Current GPA</div><div class="value">${cgpa}</div></div>
+      <div class="card"><div class="label">Total Credits</div><div class="value">${totalCredits}</div></div>
+      <div class="card"><div class="label">Semesters</div><div class="value">${semesters.length}</div></div>
+    `;
+
+    // Display semester-wise GPA
+    const semesterContainer = document.getElementById("gpa-semester-container");
+    if (semesterContainer) {
+      semesterContainer.innerHTML = semesters.map(sem => {
+        const year = Math.ceil(sem.semester / 2);
+        const semInYear = sem.semester % 2 === 0 ? 2 : 1;
+        return `
+          <div class="semester-section">
+            <h3>Year ${year} | Semester ${semInYear} | Semester GPA: ${sem.gpa}</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Code</th><th>Subject Name</th><th>Credits</th><th>CA%</th><th>Grade</th><th>Grade Points</th></tr>
+                </thead>
+                <tbody>
+                  ${sem.modules.map(m => `
+                    <tr>
+                      <td>${m.code || '–'}</td>
+                      <td>${m.name}</td>
+                      <td>${m.credits}</td>
+                      <td>${m.ca_percentage != null ? m.ca_percentage + '%' : '–'}</td>
+                      <td>${m.grade_letter || '–'}</td>
+                      <td>${m.grade_point != null ? m.grade_point : '–'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
             </div>
-          `;
-        })
-        .join("");
+          </div>
+        `;
+      }).join('');
     }
 
-    listEl.querySelectorAll("[data-task-toggle]").forEach((btn) => {
+    const tbody = document.getElementById("gpa-modules-tbody");
+    tbody.innerHTML = modules
+      .map(
+        (m) =>
+          `<tr>
+            <td>${m.name}</td>
+            <td>${m.code || "–"}</td>
+            <td>${m.credits}</td>
+            <td><input type="number" min="0" max="100" value="${m.ca_percentage != null ? m.ca_percentage : ""}" data-ca-input="${m.id}" style="max-width:90px;"></td>
+            <td>${m.grade_letter || "–"}</td>
+            <td><button type="button" class="btn btn-ghost btn-small" data-save-ca="${m.id}">Save CA</button></td>
+            <td><button type="button" class="btn btn-ghost btn-small" data-delete-module="${m.id}">Delete</button></td>
+          </tr>`
+      )
+      .join("");
+
+    const gpaUniSelect = document.getElementById("gpa-mod-university");
+    if (gpaUniSelect) {
+      gpaUniSelect.innerHTML =
+        '<option value="">Select university</option>' +
+        (universities || []).map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
+    }
+
+    const existingSelect = document.getElementById("gpa-existing-module-select");
+    if (existingSelect) {
+      const unique = [];
+      const seen = new Set();
+      (modules || []).forEach((m) => {
+        const key = `${normalizeCode(m.code)}|${m.name}|${m.credits}|${m.academic_year || ""}|${m.semester_in_year || ""}|${m.university_id || ""}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          unique.push(m);
+        }
+      });
+      existingSelect.innerHTML =
+        '<option value="">Select existing module (optional)</option>' +
+        unique
+          .map(
+            (m, idx) =>
+              `<option value="${idx}">${m.name}${m.code ? " (" + m.code + ")" : ""}${m.credits ? " - " + m.credits + " credits" : ""}</option>`
+          )
+          .join("");
+      existingSelect.onchange = () => {
+        if (!existingSelect.value) return;
+        const m = unique[parseInt(existingSelect.value, 10)];
+        if (!m) return;
+        const nameEl = document.getElementById("gpa-mod-name");
+        const codeEl = document.getElementById("gpa-mod-code");
+        const creditsEl = document.getElementById("gpa-mod-credits");
+        const yearEl = document.getElementById("gpa-mod-academic-year");
+        const semInYearEl = document.getElementById("gpa-mod-semester-in-year");
+        const semEl = document.getElementById("gpa-mod-semester");
+        const uniEl = document.getElementById("gpa-mod-university");
+        if (nameEl) nameEl.value = m.name || "";
+        if (codeEl) codeEl.value = normalizeCode(m.code || "");
+        if (creditsEl) creditsEl.value = m.credits || "";
+        if (yearEl) yearEl.value = m.academic_year || 1;
+        if (semInYearEl) semInYearEl.value = m.semester_in_year || 1;
+        if (semEl) semEl.value = m.semester || (((m.academic_year || 1) - 1) * 2 + (m.semester_in_year || 1));
+        if (uniEl && m.university_id) uniEl.value = String(m.university_id);
+      };
+    }
+
+    tbody.querySelectorAll("[data-delete-module]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-task-toggle");
-        const completed = btn.getAttribute("data-completed") === "1";
-        const newCompleted = !completed;
-        await patch("/tasks/" + id, { completed: newCompleted });
-        loadTasks();
-        trackUsage(newCompleted ? "task_complete" : "task_uncomplete", "tasks", { task_id: id });
+        await del("/modules/" + btn.getAttribute("data-delete-module"));
+        loadGpaPage();
       });
     });
-    listEl.querySelectorAll("[data-task-delete]").forEach((btn) => {
+    tbody.querySelectorAll("[data-save-ca]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-task-delete");
-        await del("/tasks/" + id);
-        loadTasks();
-        trackUsage("task_delete", "tasks", { task_id: id });
+        const moduleId = btn.getAttribute("data-save-ca");
+        const input = tbody.querySelector(`[data-ca-input="${moduleId}"]`);
+        const ca = input?.value === "" ? null : parseInt(input?.value, 10);
+        if (ca != null && (isNaN(ca) || ca < 0 || ca > 100)) {
+          alert("CA percentage must be between 0 and 100");
+          return;
+        }
+        const res = await put("/modules/" + moduleId, { ca_percentage: ca });
+        if (res?.error) {
+          alert(res.error);
+          return;
+        }
+        loadGpaPage();
       });
     });
 
-    const completedCount = tasks.filter((t) => t.completed).length;
-    const totalCount = tasks.length;
-    const ctx = document.getElementById("tasksChart");
-    if (ctx) {
-      if (tasksChart) tasksChart.destroy();
-      tasksChart = new Chart(ctx, {
-        type: "bar",
-        data: {
-          labels: ["Completed", "Remaining"],
-          datasets: [
-            {
-              label: "Tasks",
-              data: [completedCount, Math.max(0, totalCount - completedCount)],
-              backgroundColor: ["#10b981", "#2d3a4f"],
-            },
-          ],
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: true,
-          plugins: { title: { display: true, text: "Target: complete all tasks | Current: " + completedCount + " / " + totalCount } },
-        },
-      });
+    // Prefill goal planner with current totals
+    let totalCreditsCompleted = 0;
+    let totalPoints = 0;
+    modules.forEach((m) => {
+      if (m.grade_point != null) {
+        totalCreditsCompleted += m.credits;
+        totalPoints += m.grade_point * m.credits;
+      }
+    });
+    const creditsPerModuleInput = document.getElementById("goal-credits-per-module-input");
+    if (creditsPerModuleInput && modules.length > 0) {
+      const avg = modules.reduce((acc, m) => acc + (parseInt(m.credits, 10) || 0), 0) / modules.length;
+      creditsPerModuleInput.value = Math.max(1, Math.round(avg));
     }
   }
 
-  function initTasksForm() {
-    const form = document.getElementById("task-add-form");
+  function initGpaFormAndGoalPlanner() {
+    const form = document.getElementById("gpa-add-form");
     if (form) {
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const title = (document.getElementById("task-title").value || "").trim();
-        const module_code = normalizeCode(document.getElementById("task-module-code").value || "");
-        const due_date = document.getElementById("task-due-date").value || null;
-        const priority_score = parseInt(document.getElementById("task-priority").value, 10) || 5;
-        if (!module_code) {
+        const name = (document.getElementById("gpa-mod-name").value || "").trim();
+        const code = normalizeCode(document.getElementById("gpa-mod-code").value || "");
+        const universityId = document.getElementById("gpa-mod-university")?.value || "";
+        const academicYear = parsePositiveInt(document.getElementById("gpa-mod-academic-year")?.value);
+        const semesterInYear = parsePositiveInt(document.getElementById("gpa-mod-semester-in-year")?.value);
+        const credits = parseInt(document.getElementById("gpa-mod-credits").value, 10);
+        const caPercentage = document.getElementById("gpa-mod-ca").value ? parseInt(document.getElementById("gpa-mod-ca").value, 10) : null;
+        const gradeLetter = document.getElementById("gpa-mod-grade").value;
+        const semester = parseInt(document.getElementById("gpa-mod-semester").value, 10) || (academicYear && semesterInYear ? ((academicYear - 1) * 2 + semesterInYear) : 1);
+        const grade_point = gradeLetter ? (GRADE_POINTS[gradeLetter] ?? null) : null;
+//GPA VALIDATION
+        if (!name || name.length > 255) {
+          alert("Module name is required (1–255 characters)");
+          return;
+        }
+        if (!code) {
           alert("Module code is required");
           return;
         }
-        if (!title || title.length > 500) {
-          alert("Task title is required (1–500 characters)");
+        if (!universityId) {
+          alert("Please select university");
           return;
         }
-        if (priority_score < 1 || priority_score > 10) {
-          alert("Priority must be between 1 and 10");
+        if (!academicYear || academicYear < 1 || academicYear > 10) {
+          alert("Academic year must be between 1 and 10");
           return;
         }
-        const res = await post("/tasks", { user_id: currentUser.id, module_code, title, due_date, priority_score });
+        if (!semesterInYear || semesterInYear < 1 || semesterInYear > 3) {
+          alert("Semester must be between 1 and 3");
+          return;
+        }
+        if (isNaN(credits) || credits < 1 || credits > 30) {
+          alert("Credits must be between 1 and 30");
+          return;
+        }
+        if (caPercentage != null && (caPercentage < 0 || caPercentage > 100)) {
+          alert("CA percentage must be between 0 and 100");
+          return;
+        }
+        if (semester < 1 || semester > 20) {
+          alert("Semester must be between 1 and 20");
+          return;
+        }
+
+        const res = await post("/modules", {
+          user_id: currentUser.id,
+          university_id: universityId,
+          academic_year: academicYear,
+          semester_in_year: semesterInYear,
+          name,
+          code,
+          credits,
+          grade_letter: gradeLetter || null,
+          grade_point,
+          ca_percentage: caPercentage,
+          semester,
+        });
         if (res && res.error) {
           alert(res.error);
           return;
         }
+        if (res && res.updated) {
+          alert("Existing module record was updated for this module code.");
+        }
         form.reset();
-        document.getElementById("task-priority").value = 5;
-        loadTasks();
-        trackUsage("task_add", "tasks", { due_date });
+        document.getElementById("gpa-mod-semester").value = 1;
+        document.getElementById("gpa-mod-academic-year").value = 1;
+        document.getElementById("gpa-mod-semester-in-year").value = 1;
+        const existingSelect = document.getElementById("gpa-existing-module-select");
+        if (existingSelect) existingSelect.value = "";
+        loadGpaPage();
+        trackUsage("module_add", "gpa", { credits, semester });
+      });
+    }
+
+    const calcBtn = document.getElementById("calculate-goal-btn");
+    const resultEl = document.getElementById("goal-planner-result");
+    const goalInputs = [
+      "target-gpa-input",
+      "goal-academic-year-input",
+      "goal-semester-input",
+      "goal-module-count-input",
+      "goal-credits-per-module-input"
+    ];
+
+    const calculateGoal = () => {
+      const targetGpa = parseFloat(document.getElementById("target-gpa-input").value);
+      const goalAcademicYear = parsePositiveInt(document.getElementById("goal-academic-year-input").value);
+      const goalSemester = parsePositiveInt(document.getElementById("goal-semester-input").value);
+      const moduleCount = parsePositiveInt(document.getElementById("goal-module-count-input").value, 0);
+      const creditsPerModule = parsePositiveInt(document.getElementById("goal-credits-per-module-input").value, 3) || 3;
+      let completedCredits = 0;
+      let currentPoints = 0;
+      const tableRows = Array.from(document.querySelectorAll("#gpa-modules-tbody tr"));
+      tableRows.forEach((row) => {
+        const creditsText = row.children?.[2]?.textContent || "0";
+        const gradeText = row.children?.[4]?.textContent || "";
+        const credits = parseInt(creditsText, 10) || 0;
+        const gp = GRADE_POINTS[gradeText] != null ? GRADE_POINTS[gradeText] : null;
+        if (gp != null) {
+          completedCredits += credits;
+          currentPoints += gp * credits;
+        }
+      });
+      const totalCredits = completedCredits + moduleCount * creditsPerModule;
+
+      if (!targetGpa || !goalAcademicYear || !goalSemester || !moduleCount) {
+        resultEl.classList.add("hidden");
+        return;
+      }
+
+      try {
+        const result = calculateTargetPlan({
+          targetGpa,
+          totalCredits,
+          completedCredits,
+          currentPoints,
+          totalModules: moduleCount
+        });
+
+        if (result.message) {
+          resultEl.innerHTML = `<p>${result.message}</p>`;
+          resultEl.classList.remove("hidden");
+          return;
+        }
+
+        resultEl.innerHTML = `
+          <h4>To achieve GPA ${targetGpa}:</h4>
+          <p>Academic Year ${goalAcademicYear}, Semester ${goalSemester}</p>
+          <div class="goal-result-grid">
+            <div class="goal-item">
+              <div class="label">Remaining GPA needed</div>
+              <div class="value">${result.requiredRemainingGPA}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Target Grade</div>
+              <div class="value">${result.suggestedGrade}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Required CA% per module</div>
+              <div class="value">${result.requiredCA}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Required grade per module</div>
+              <div class="value">${result.suggestedGrade}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Required CGPA</div>
+              <div class="value">${result.requiredCgpa}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Required points per module</div>
+              <div class="value">${result.perModulePoints ?? "–"}</div>
+            </div>
+            <div class="goal-item">
+              <div class="label">Total points needed from remaining modules</div>
+              <div class="value">${result.remainingPoints}</div>
+            </div>
+          </div>
+          <p class="goal-note">This is an estimate. Actual grades depend on your final exam performance and CA weighting.</p>
+        `;
+        resultEl.classList.remove("hidden");
+      } catch (error) {
+        resultEl.innerHTML = `<p>${error.message}</p>`;
+        resultEl.classList.remove("hidden");
+      }
+    };
+
+    if (calcBtn && resultEl) {
+      calcBtn.addEventListener("click", calculateGoal);
+      
+      // Auto-calculate when inputs change
+      goalInputs.forEach(inputId => {
+        const input = document.getElementById(inputId);
+        if (input) {
+          input.addEventListener("input", calculateGoal);
+        }
       });
     }
   }
+
 
   // ==============================
   // Repeat & Improvement (charts, record improvement, remove entries)
@@ -814,425 +959,6 @@
 
   initRepeatImprovementForm();
   initRepeatAddModuleForm();
-
-  // ==============================
-  // Admin pages
-  // ==============================
-
-  function requireAdminOnlyUI() {
-    if (!currentUser || currentUser.role !== "admin") {
-      alert("Admin access only");
-      return false;
-    }
-    return true;
-  }
-
-  async function loadAdminDashboard() {
-    if (!requireAdminOnlyUI()) return;
-    const [users, unis, hallsTotal, openConcerns] = await Promise.all([
-      get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []),
-      get("/universities").catch(() => []),
-      (async () => {
-        const unisRows = await get("/universities").catch(() => []);
-        let total = 0;
-        for (const u of unisRows) {
-          const hs = await get("/universities/" + u.id + "/halls").catch(() => []);
-          total += hs.length;
-        }
-        return total;
-      })(),
-      get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=open").catch(() => []),
-    ]);
-    document.getElementById("admin-total-users").textContent = users.length;
-    document.getElementById("admin-total-universities").textContent = unis.length;
-    document.getElementById("admin-open-concerns").textContent = openConcerns.length;
-    document.getElementById("admin-total-halls").textContent = hallsTotal;
-  }
-
-  async function loadAdminUsers() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-users-tbody");
-    if (!tbody) return;
-    const users = await get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []);
-    tbody.innerHTML = users.length
-      ? users
-          .map(
-            (u) => `
-          <tr>
-            <td>${u.name || "—"}</td>
-            <td>${u.email || "—"}</td>
-            <td>${u.index_number || "—"}</td>
-            <td>${u.role || "student"}</td>
-            <td>${u.created_at ? String(u.created_at).slice(0, 10) : "—"}</td>
-            <td>
-              <select data-role-sel="${u.id}" class="admin-role-select">
-                <option value="student" ${u.role === "student" ? "selected" : ""}>student</option>
-                <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
-              </select>
-              <button type="button" class="btn btn-ghost btn-small" data-role-save="${u.id}">Save</button>
-            </td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"6\">No users</td></tr>";
-
-    tbody.querySelectorAll("[data-role-save]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-role-save");
-        const sel = tbody.querySelector('select[data-role-sel="' + id + '"]');
-        const role = sel?.value || "student";
-        const res = await put("/admin/users/" + id + "/role", { admin_user_id: currentUser.id, role });
-        if (res && res.error) alert(res.error);
-        // If the currently logged-in admin promoted/changed their own role,
-        // reload so the UI immediately switches to admin-only options.
-        if (String(id) === String(currentUser.id)) {
-          currentUser.role = role;
-          const nowIsAdmin = currentUser.role === "admin";
-          document.querySelectorAll(".admin-only").forEach((el) => el.classList.toggle("hidden", !nowIsAdmin));
-          document.querySelectorAll(".student-only").forEach((el) => el.classList.toggle("hidden", nowIsAdmin));
-          showPage(nowIsAdmin ? "admin-dashboard" : "dashboard");
-          return;
-        }
-        await loadAdminUsers();
-      });
-    });
-  }
-
-  async function loadAdminUniversitiesForHalls() {
-    if (!requireAdminOnlyUI()) return;
-    const universities = await loadUniversitiesCache();
-    const select = document.getElementById("admin-university-select-halls");
-    if (select) {
-      select.innerHTML =
-        '<option value="">Select university</option>' +
-        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-      if (!select.dataset.bound) {
-        select.dataset.bound = "1";
-        select.addEventListener("change", () => loadAdminHallsPage());
-      }
-    }
-    const ttSelect = document.getElementById("admin-university-select-timetable");
-    if (ttSelect) {
-      ttSelect.innerHTML =
-        '<option value="">Select university</option>' +
-        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-      if (!ttSelect.dataset.bound) {
-        ttSelect.dataset.bound = "1";
-        ttSelect.addEventListener("change", () => loadAdminTimetablePdfs());
-      }
-    }
-  }
-
-  async function loadAdminHallsPage() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-halls-tbody");
-    if (!tbody) return;
-
-    const mapEl = document.getElementById("admin-hall-map");
-    const latInput = document.getElementById("admin-hall-lat");
-    const lngInput = document.getElementById("admin-hall-lng");
-    const radiusInput = document.getElementById("admin-hall-radius");
-    const universityId = document.getElementById("admin-university-select-halls")?.value;
-
-    const syncCircle = () => {
-      if (!adminHallMap || !adminHallMarker || !adminHallCircle) return;
-      const lat = parseFloat(latInput?.value || "6.9271");
-      const lng = parseFloat(lngInput?.value || "79.8612");
-      const radius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
-      if (!isNaN(lat) && !isNaN(lng)) {
-        adminHallMarker.setLatLng([lat, lng]);
-        adminHallCircle.setLatLng([lat, lng]);
-      }
-      if (!isNaN(radius)) adminHallCircle.setRadius(radius);
-    };
-
-    if (mapEl && typeof L !== "undefined" && !adminHallMap) {
-      const initLat = parseFloat(latInput?.value || "6.9271");
-      const initLng = parseFloat(lngInput?.value || "79.8612");
-      const initRadius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
-      adminHallMap = L.map(mapEl).setView([initLat, initLng], 16);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap contributors",
-      }).addTo(adminHallMap);
-      adminHallMarker = L.marker([initLat, initLng], { draggable: true }).addTo(adminHallMap);
-      adminHallCircle = L.circle([initLat, initLng], { radius: initRadius, color: "#00c9a7" }).addTo(adminHallMap);
-
-      adminHallMap.on("click", (e) => {
-        if (latInput) latInput.value = e.latlng.lat.toFixed(7);
-        if (lngInput) lngInput.value = e.latlng.lng.toFixed(7);
-        syncCircle();
-      });
-      adminHallMarker.on("dragend", () => {
-        const pos = adminHallMarker.getLatLng();
-        if (latInput) latInput.value = pos.lat.toFixed(7);
-        if (lngInput) lngInput.value = pos.lng.toFixed(7);
-        syncCircle();
-      });
-      if (latInput && !latInput.dataset.mapBound) {
-        latInput.dataset.mapBound = "1";
-        latInput.addEventListener("input", syncCircle);
-      }
-      if (lngInput && !lngInput.dataset.mapBound) {
-        lngInput.dataset.mapBound = "1";
-        lngInput.addEventListener("input", syncCircle);
-      }
-      if (radiusInput && !radiusInput.dataset.mapBound) {
-        radiusInput.dataset.mapBound = "1";
-        radiusInput.addEventListener("input", syncCircle);
-      }
-      setTimeout(() => adminHallMap.invalidateSize(), 50);
-    } else {
-      syncCircle();
-    }
-
-    const form = document.getElementById("admin-add-hall-form");
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = "1";
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const res = await post("/admin/lecture-halls", {
-          admin_user_id: currentUser.id,
-          university_id: document.getElementById("admin-university-select-halls")?.value,
-          hall_name: document.getElementById("admin-hall-name")?.value,
-          building_name: document.getElementById("admin-hall-building")?.value,
-          floor_number: document.getElementById("admin-hall-floor")?.value,
-          center_lat: document.getElementById("admin-hall-lat")?.value,
-          center_lng: document.getElementById("admin-hall-lng")?.value,
-          radius_m: document.getElementById("admin-hall-radius")?.value,
-        });
-        if (res && res.error) return alert(res.error);
-        form.reset();
-        await loadAdminHallsPage();
-      });
-    }
-
-    const uniForm = document.getElementById("admin-add-university-form");
-    if (uniForm && !uniForm.dataset.bound) {
-      uniForm.dataset.bound = "1";
-      uniForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const name = document.getElementById("admin-university-name")?.value || "";
-        const email = document.getElementById("admin-university-email")?.value || "";
-        const res = await post("/admin/universities", {
-          admin_user_id: currentUser.id,
-          name,
-          general_email: email,
-        });
-        if (res && res.error) return alert(res.error);
-        uniForm.reset();
-        universitiesCache = null;
-        await loadAdminUniversitiesForHalls();
-        await loadAdminHallsPage();
-      });
-    }
-
-    if (!universityId) {
-      tbody.innerHTML = "<tr><td colspan=\"7\">Select a university</td></tr>";
-      return;
-    }
-
-    const halls = await get("/universities/" + universityId + "/halls").catch(() => []);
-    tbody.innerHTML = halls.length
-      ? halls
-          .map(
-            (h) => `
-          <tr>
-            <td>${h.hall_name}</td>
-            <td>${h.building_name || "—"}</td>
-            <td>${h.floor_number ?? "—"}</td>
-            <td>${h.center_lat}</td>
-            <td>${h.center_lng}</td>
-            <td>${h.radius_m}</td>
-            <td><button type="button" class="btn btn-ghost btn-small" data-hall-remove="${h.id}">Remove</button></td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"7\">No halls yet</td></tr>";
-
-    tbody.querySelectorAll("[data-hall-remove]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-hall-remove");
-        const res = await fetch(API + "/admin/lecture-halls/" + id, {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ admin_user_id: currentUser.id }),
-          credentials: "include",
-        }).then((r) => r.json());
-        if (res && res.error) return alert(res.error);
-        await loadAdminHallsPage();
-      });
-    });
-  }
-
-  async function loadAdminTimetablePdfs() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-timetable-list-tbody");
-    if (!tbody) return;
-    const uni = document.getElementById("admin-university-select-timetable")?.value;
-    const url = uni
-      ? "/admin/timetable-pdfs?admin_user_id=" + currentUser.id + "&university_id=" + uni
-      : "/admin/timetable-pdfs?admin_user_id=" + currentUser.id;
-    const rows = await get(url).catch(() => []);
-    tbody.innerHTML = rows.length
-      ? rows
-          .map(
-            (r) => `
-          <tr>
-            <td>${r.semester}</td>
-            <td><a href="/uploads/${String(r.file_path).split(/[\\\\/]/).pop()}" target="_blank">Open PDF</a></td>
-            <td>${r.created_at ? String(r.created_at).slice(0, 10) : "—"}</td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"3\">No uploads yet</td></tr>";
-
-    const form = document.getElementById("admin-timetable-upload-form");
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = "1";
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const uid = document.getElementById("admin-university-select-timetable")?.value;
-        const semester = document.getElementById("admin-timetable-semester")?.value || "";
-        const fileInput = document.getElementById("admin-timetable-file");
-        const file = fileInput?.files?.[0];
-        if (!uid) return alert("Select a university");
-        if (!semester) return alert("Enter semester");
-        if (!file) return alert("Select a PDF file");
-
-        const fd = new FormData();
-        fd.append("admin_user_id", currentUser.id);
-        fd.append("university_id", uid);
-        fd.append("semester", semester);
-        fd.append("file", file);
-
-        const resp = await fetch(API + "/admin/timetable-pdfs", { method: "POST", body: fd, credentials: "include" });
-        const json = await resp.json().catch(() => ({}));
-        if (!resp.ok || json.error) return alert(json.error || "Upload failed");
-        form.reset();
-        await loadAdminTimetablePdfs();
-      });
-    }
-  }
-
-  async function loadAdminConcerns() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-concerns-tbody");
-    if (!tbody) return;
-    const status = document.getElementById("admin-concerns-status")?.value || "open";
-    const rows = await get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=" + status).catch(() => []);
-    tbody.innerHTML = rows.length
-      ? rows
-          .map(
-            (c) => `
-          <tr>
-            <td>${c.student_name || "—"}</td>
-            <td>${c.university_name || "—"}</td>
-            <td>${c.category || "—"}</td>
-            <td>${c.status || "—"}</td>
-            <td>${(c.message || "").slice(0, 220)}${(c.message || "").length > 220 ? "..." : ""}</td>
-            <td>
-              ${
-                c.status === "forwarded"
-                  ? "—"
-                  : `<button type="button" class="btn btn-ghost btn-small" data-forward="${c.id}">Forward</button>`
-              }
-            </td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"6\">No concerns</td></tr>";
-
-    tbody.querySelectorAll("[data-forward]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-forward");
-        const res = await post("/admin/concerns/" + id + "/forward", { admin_user_id: currentUser.id });
-        if (res && res.error) return alert(res.error);
-        await loadAdminConcerns();
-      });
-    });
-
-    const refreshBtn = document.getElementById("admin-refresh-concerns-btn");
-    if (refreshBtn && !refreshBtn.dataset.bound) {
-      refreshBtn.dataset.bound = "1";
-      refreshBtn.addEventListener("click", () => loadAdminConcerns());
-    }
-    const statusSelect = document.getElementById("admin-concerns-status");
-    if (statusSelect && !statusSelect.dataset.bound) {
-      statusSelect.dataset.bound = "1";
-      statusSelect.addEventListener("change", () => loadAdminConcerns());
-    }
-  }
-
-  async function loadAdminUsage() {
-    if (!requireAdminOnlyUI()) return;
-    const days = 7;
-    const summary = await get("/admin/analytics/usage-summary?admin_user_id=" + currentUser.id + "&days=" + days).catch(() => null);
-    if (!summary) return;
-    const rows = summary.rows || [];
-
-    const total = rows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-events").textContent = total;
-
-    // page_view + task_add split
-    const pageViewRows = rows.filter((r) => r.event_type === "page_view");
-    const taskAddRows = rows.filter((r) => r.event_type === "task_add");
-    const pageViews = pageViewRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    const taskAdds = taskAddRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-page-views").textContent = pageViews;
-    document.getElementById("admin-total-task-adds").textContent = taskAdds;
-
-    const taskCompleteRows = rows.filter((r) => r.event_type === "task_complete");
-    const taskCompletes = taskCompleteRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-task-completes").textContent = taskCompletes;
-
-    const attendanceRows = rows.filter((r) => r.event_type === "attendance_mark");
-    const attendanceMarks = attendanceRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-attendance-marks").textContent = attendanceMarks;
-
-    const concernRows = rows.filter((r) => r.event_type === "concern_submit");
-    const concernSubmits = concernRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-concerns-submits").textContent = concernSubmits;
-
-    const daysArr = Array.from(new Set(rows.map((r) => r.day))).sort();
-    const pageByDay = daysArr.map((d) =>
-      rows.filter((r) => r.day === d && r.event_type === "page_view").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
-    );
-    const taskByDay = daysArr.map((d) =>
-      rows.filter((r) => r.day === d && r.event_type === "task_add").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
-    );
-
-    const ctx = document.getElementById("admin-usage-chart");
-    if (ctx) {
-      if (adminUsageChart) adminUsageChart.destroy();
-      adminUsageChart = new Chart(ctx, {
-        type: "bar",
-        data: {
-          labels: daysArr,
-          datasets: [
-            { label: "Page views", data: pageByDay, backgroundColor: "#00c9a7" },
-            { label: "Task adds", data: taskByDay, backgroundColor: "#f59e0b" },
-          ],
-        },
-        options: { responsive: true, maintainAspectRatio: true },
-      });
-    }
-
-    const exportBtn = document.getElementById("admin-export-usage-excel");
-    if (exportBtn && !exportBtn.dataset.bound) {
-      exportBtn.dataset.bound = "1";
-      exportBtn.addEventListener("click", () => {
-        window.open(
-          API + "/admin/analytics/usage-export-excel?admin_user_id=" + currentUser.id + "&days=" + days,
-          "_blank"
-        );
-      });
-    }
-  }
-
 
   // ==============================
   // Auth form listeners
