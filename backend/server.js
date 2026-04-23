@@ -392,11 +392,16 @@ app.post("/modules", async (req, res) => {
   try {
     const {
       user_id,
+      university_id,
+      academic_year,
+      semester_in_year,
+      source_type,
       name,
       code,
       credits,
       grade_letter,
       grade_point,
+      ca_percentage,
       semester,
       is_repeat,
     } = req.body;
@@ -406,20 +411,83 @@ app.post("/modules", async (req, res) => {
     const cred = parseInt(credits, 10) || 3;
     if (cred < 1 || cred > 30) return res.status(400).json({ error: "Credits must be between 1 and 30" });
     if (grade_letter && !VALID_GRADES.includes(grade_letter)) return res.status(400).json({ error: "Invalid grade" });
-    const sem = parseInt(semester, 10) || 1;
-    if (sem < 1 || sem > 20) return res.status(400).json({ error: "Semester must be between 1 and 20" });
+    const ca = ca_percentage != null ? parseInt(ca_percentage, 10) : null;
+    if (ca != null && (ca < 0 || ca > 100)) return res.status(400).json({ error: "CA percentage must be between 0 and 100" });
+
+    const c = (typeof code === "string" ? code.trim().slice(0, 50) : "").toUpperCase();
+    if (!c) return res.status(400).json({ error: "Module code is required" });
+
+    const sem = semester != null ? parseInt(semester, 10) : 1;
+    if (!sem || isNaN(sem) || sem < 1 || sem > 20) return res.status(400).json({ error: "Semester must be between 1 and 20" });
+
+    const uniId = university_id != null && university_id !== "" ? parseInt(university_id, 10) : null;
+    if (uniId != null && isNaN(uniId)) return res.status(400).json({ error: "university_id is invalid" });
+
+    const ay = academic_year != null && academic_year !== "" ? parseInt(academic_year, 10) : null;
+    if (ay != null && (isNaN(ay) || ay < 1 || ay > 10)) return res.status(400).json({ error: "Academic year must be between 1 and 10" });
+
+    const siy = semester_in_year != null && semester_in_year !== "" ? parseInt(semester_in_year, 10) : null;
+    if (siy != null && (isNaN(siy) || siy < 1 || siy > 3)) return res.status(400).json({ error: "Semester must be between 1 and 3" });
+
+    // If module code already exists for this user/semester/university, update that record.
+    const dupRows = await query(
+      "SELECT id FROM modules WHERE user_id=? AND UPPER(code)=? AND semester=? AND (university_id <=> ?) LIMIT 1",
+      [user_id, c, sem, uniId]
+    );
+    const srcType = typeof source_type === "string" && source_type.trim() ? source_type.trim().slice(0, 30) : "normal";
+    if (dupRows.length) {
+      const existingId = dupRows[0].id;
+      await db.query(
+        `UPDATE modules
+         SET university_id=?,
+             academic_year=?,
+             semester_in_year=?,
+             source_type=?,
+             name=?,
+             code=?,
+             credits=?,
+             grade_letter=?,
+             grade_point=?,
+             ca_percentage=?,
+             semester=?,
+             is_repeat=?
+         WHERE id=?`,
+        [
+          uniId,
+          ay,
+          siy,
+          srcType,
+          n,
+          c,
+          cred,
+          grade_letter || null,
+          grade_point != null ? parseFloat(grade_point) : null,
+          ca,
+          sem,
+          is_repeat ? 1 : 0,
+          existingId,
+        ]
+      );
+      return res.json({ id: existingId, updated: true });
+    }
+
     const sql = `
       INSERT INTO modules
-      (user_id, name, code, credits, grade_letter, grade_point, semester, is_repeat)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (user_id, university_id, academic_year, semester_in_year, source_type, name, code, credits, grade_letter, grade_point, ca_percentage, semester, is_repeat)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const [result] = await db.query(sql, [
       user_id,
+      uniId,
+      ay,
+      siy,
+      srcType,
       n,
-      (typeof code === "string" ? code.trim().slice(0, 50) : "") || "",
+      c,
       cred,
       grade_letter || null,
       grade_point != null ? parseFloat(grade_point) : null,
+      ca,
       sem,
       is_repeat ? 1 : 0,
     ]);
@@ -440,9 +508,10 @@ app.put("/modules/:id", async (req, res) => {
     if (isNaN(moduleId)) return res.status(400).json({ error: "Invalid module ID" });
     const existing = await query("SELECT id FROM modules WHERE id=?", [moduleId]);
     if (existing.length === 0) return res.status(404).json({ error: "Module not found" });
-    const { grade_letter, grade_point, is_repeat, semester } = req.body;
+    const { grade_letter, grade_point, ca_percentage, is_repeat, semester } = req.body;
     const updates = [];
     const values = [];
+    //VALIDATION
     if (grade_letter !== undefined) {
       if (grade_letter && !VALID_GRADES.includes(grade_letter)) return res.status(400).json({ error: "Invalid grade" });
       updates.push("grade_letter=?");
@@ -453,6 +522,14 @@ app.put("/modules/:id", async (req, res) => {
       if (gp != null && (isNaN(gp) || gp < 0 || gp > 4)) return res.status(400).json({ error: "Grade point must be between 0 and 4" });
       updates.push("grade_point=?");
       values.push(gp);
+    }
+    if (ca_percentage !== undefined) {
+      const ca = ca_percentage != null ? parseInt(ca_percentage, 10) : null;
+      if (ca != null && (isNaN(ca) || ca < 0 || ca > 100)) {
+        return res.status(400).json({ error: "CA percentage must be between 0 and 100" });
+      }
+      updates.push("ca_percentage=?");
+      values.push(ca);
     }
     if (is_repeat !== undefined) {
       updates.push("is_repeat=?");
@@ -497,24 +574,51 @@ app.delete("/modules/:id", async (req, res) => {
 
 app.get("/users/:id/gpa", async (req, res) => {
   try {
-    const rows = await query("SELECT * FROM modules WHERE user_id=?", [
+    const rows = await query("SELECT * FROM modules WHERE user_id=? ORDER BY semester, name", [
       req.params.id,
     ]);
-    let totalCredits = 0;
-    let totalPoints = 0;
+
+    // Group modules by semester
+    const semesters = {};
+    let overallCredits = 0;
+    let overallPoints = 0;
+
     rows.forEach((m) => {
+      const sem = m.semester || 1;
+      if (!semesters[sem]) {
+        semesters[sem] = { modules: [], credits: 0, points: 0 };
+      }
+      semesters[sem].modules.push(m);
       if (m.grade_point != null) {
-        totalCredits += m.credits;
-        totalPoints += m.grade_point * m.credits;
+        semesters[sem].credits += m.credits;
+        semesters[sem].points += m.grade_point * m.credits;
+        overallCredits += m.credits;
+        overallPoints += m.grade_point * m.credits;
       }
     });
-    const gpa = totalCredits ? (totalPoints / totalCredits).toFixed(2) : 0;
+
+    // Calculate semester GPAs
+    const semesterGpas = Object.keys(semesters).map(sem => {
+      const data = semesters[sem];
+      const gpa = data.credits ? (data.points / data.credits).toFixed(2) : 0;
+      return {
+        semester: parseInt(sem),
+        gpa: parseFloat(gpa),
+        credits: data.credits,
+        modules: data.modules
+      };
+    }).sort((a, b) => a.semester - b.semester);
+
+    const overallGpa = overallCredits ? (overallPoints / overallCredits).toFixed(2) : 0;
+
     res.json({
-      overall: { gpa },
+      overall: { gpa: parseFloat(overallGpa), credits: overallCredits },
+      semesters: semesterGpas,
       modules: rows,
     });
   } catch (err) {
-    res.json({ overall: { gpa: 0 }, modules: [] });
+    console.error('GPA calculation error:', err);
+    res.json({ overall: { gpa: 0, credits: 0 }, semesters: [], modules: [] });
   }
 });
 
@@ -610,6 +714,7 @@ app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) =
     let delivery_mode = body.delivery_mode;
     let university_id = body.university_id;
     let hall_id = body.hall_id;
+    const academic_year = body.academic_year;
     const lecture_date = body.lecture_date;
 
     if (!user_id) return res.status(400).json({ error: "user_id is required" });
@@ -643,7 +748,7 @@ app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) =
     const uniId = university_id ? parseInt(university_id, 10) : null;
     const hallId = hall_id ? parseInt(hall_id, 10) : null;
     const dateVal = lecture_date ? String(lecture_date).slice(0, 10) : null;
-    const yearNumber = dateVal ? new Date(dateVal).getFullYear() : null;
+    const yearNumber = academic_year != null ? parseInt(academic_year, 10) : null;
 
     let verificationStatus = "pending";
     let proofPath = null;
@@ -653,8 +758,8 @@ app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) =
       if (!uniId || !hallId || !sem) {
         return res.status(400).json({ error: "Offline attendance requires university, hall and semester" });
       }
-      if (!dateVal || yearNumber == null || isNaN(yearNumber)) {
-        return res.status(400).json({ error: "Offline attendance requires lecture_date (to verify timetable)" });
+      if (yearNumber == null || isNaN(yearNumber) || yearNumber < 1 || yearNumber > 10) {
+        return res.status(400).json({ error: "Offline attendance requires academic_year (1-10)" });
       }
       const halls = await query("SELECT id FROM lecture_halls WHERE id=? AND university_id=?", [hallId, uniId]);
       if (!halls.length) return res.status(400).json({ error: "Selected hall does not belong to the selected university" });
@@ -670,15 +775,15 @@ app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) =
         return res.status(400).json({ error: "Online attendance requires university and semester" });
       }
       if (!req.file) return res.status(400).json({ error: "Proof upload is required for online lecture mode" });
-      const allowed = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
+      const allowed = ["application/pdf"];
       if (!allowed.includes(req.file.mimetype)) {
-        return res.status(400).json({ error: "Proof must be PDF or image (png/jpg/webp)" });
+        return res.status(400).json({ error: "Proof must be PDF" });
       }
       proofPath = req.file.path;
-      // Presence-based: verify timetable exists for semester+year.
+      // Presence-based: verify timetable exists for semester+academic year.
       const lectureYear = yearNumber;
-      if (!dateVal || lectureYear == null || isNaN(lectureYear)) {
-        return res.status(400).json({ error: "Online attendance requires lecture_date (to verify timetable)" });
+      if (lectureYear == null || isNaN(lectureYear) || lectureYear < 1 || lectureYear > 10) {
+        return res.status(400).json({ error: "Online attendance requires academic_year (1-10)" });
       }
       const timetableRows = await query(
         "SELECT id FROM timetable_pdfs WHERE uploaded_by_user_id=? AND university_id=? AND semester=? AND year_number=? ORDER BY created_at DESC LIMIT 1",
@@ -705,7 +810,7 @@ app.post("/attendance/mark", timetableUpload.single("proof"), async (req, res) =
         verificationStatus,
       ]
     );
-
+//attendance validation
     let attendanceInserted = false;
     if (verificationStatus === "auto_verified") {
       await db.query(
@@ -874,9 +979,10 @@ app.post("/attendance/slots", async (req, res) => {
     const loc = location_text ? String(location_text).slice(0, 255) : null;
     const hallId = hall_id ? parseInt(hall_id, 10) : null;
 
+    //ERROR HANDLING
     if (!uniId || isNaN(uniId)) return res.status(400).json({ error: "university_id is invalid" });
     if (!sem || isNaN(sem)) return res.status(400).json({ error: "semester is invalid" });
-    if (!yn || isNaN(yn) || yn < 2000 || yn > 2100) return res.status(400).json({ error: "year_number is invalid" });
+    if (!yn || isNaN(yn) || yn < 1 || yn > 10) return res.status(400).json({ error: "academic year is invalid" });
     if (!day || day.length > 15) return res.status(400).json({ error: "day_of_week is required" });
     if (!st || !et) return res.status(400).json({ error: "start_time and end_time are required" });
     if (!mn || mn.length > 255) return res.status(400).json({ error: "module_name is required" });
@@ -944,67 +1050,6 @@ app.get("/attendance/slots", async (req, res) => {
 });
 
 // ============================
-// Tasks
-// ============================
-
-app.get("/users/:id/tasks", async (req, res) => {
-  try {
-    const rows = await query("SELECT * FROM tasks WHERE user_id=? ORDER BY due_date ASC, priority_score DESC", [
-      req.params.id,
-    ]);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.post("/tasks", async (req, res) => {
-  try {
-    const { user_id, title, due_date, priority_score } = req.body;
-    if (!user_id) return res.status(400).json({ error: "User ID is required" });
-    const t = typeof title === "string" ? title.trim() : "";
-    if (!t || t.length > 500) return res.status(400).json({ error: "Task title is required (1–500 characters)" });
-    const prio = parseInt(priority_score, 10) || 5;
-    if (prio < 1 || prio > 10) return res.status(400).json({ error: "Priority must be between 1 and 10" });
-    let due = null;
-    if (due_date) {
-      const d = new Date(due_date);
-      if (!isNaN(d.getTime())) due = due_date;
-    }
-    const sql = `
-      INSERT INTO tasks (user_id, title, due_date, priority_score)
-      VALUES (?, ?, ?, ?)
-    `;
-    const [result] = await db.query(sql, [user_id, t, due, prio]);
-    res.json({ id: result.insertId });
-  } catch (err) {
-    res.json({ error: "Task insert failed" });
-  }
-});
-
-app.patch("/tasks/:id", async (req, res) => {
-  try {
-    const { completed } = req.body;
-    await query("UPDATE tasks SET completed=? WHERE id=?", [
-      completed ? 1 : 0,
-      req.params.id,
-    ]);
-    res.json({ success: true });
-  } catch (err) {
-    res.json({ error: "Update failed" });
-  }
-});
-
-app.delete("/tasks/:id", async (req, res) => {
-  try {
-    await query("DELETE FROM tasks WHERE id=?", [req.params.id]);
-    res.json({ success: true });
-  } catch (err) {
-    res.json({ error: "Delete failed" });
-  }
-});
-
-// ============================
 // Universities & lecture halls (circle geofence)
 // ============================
 
@@ -1027,502 +1072,6 @@ app.get("/universities/:id/halls", async (req, res) => {
   } catch (err) {
     res.json([]);
   }
-});
-
-// ============================
-// Admin: universities & lecture halls
-// ============================
-
-// ============================
-// Admin: user management
-// ============================
-
-app.get("/admin/users", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const rows = await query(
-      "SELECT id, name, email, index_number, role, created_at, target_gpa, target_attendance, notify_deadlines, deadline_reminder_days FROM users ORDER BY created_at DESC"
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.get("/admin/users/:id", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const rows = await query(
-      "SELECT id, name, email, index_number, role, created_at, target_gpa, target_attendance, notify_deadlines, deadline_reminder_days FROM users WHERE id=?",
-      [req.params.id]
-    );
-    res.json(rows[0] || {});
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.put("/admin/users/:id/role", async (req, res) => {
-  try {
-    const { admin_user_id, role } = req.body || {};
-    const adminUserId = admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const newRole = role === "admin" ? "admin" : "student";
-    await query("UPDATE users SET role=? WHERE id=?", [newRole, req.params.id]);
-    res.json({ success: true, role: newRole });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.post("/admin/universities", async (req, res) => {
-  try {
-    const { admin_user_id, name, general_email } = req.body;
-    const adminUserId = admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const n = typeof name === "string" ? name.trim() : "";
-    if (!n || n.length > 255) return res.status(400).json({ error: "University name is required (max 255)" });
-    const e = typeof general_email === "string" ? general_email.trim() : "";
-    if (!e || !isValidEmail(e)) return res.status(400).json({ error: "Valid general_email is required" });
-    await query("INSERT INTO universities(name, general_email) VALUES (?, ?)", [n, e]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.post("/admin/lecture-halls", async (req, res) => {
-  try {
-    const { admin_user_id, university_id, hall_name, building_name, floor_number, center_lat, center_lng, radius_m } = req.body;
-    const adminUserId = admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const uid = parseInt(university_id, 10);
-    if (isNaN(uid)) return res.status(400).json({ error: "university_id is invalid" });
-    const hn = typeof hall_name === "string" ? hall_name.trim() : "";
-    if (!hn || hn.length > 255) return res.status(400).json({ error: "hall_name is required (max 255)" });
-    const bl = building_name != null ? String(building_name).trim() : null;
-    const fn = floor_number == null ? null : parseInt(floor_number, 10);
-    const lat = parseFloat(center_lat);
-    const lng = parseFloat(center_lng);
-    const r = parseInt(radius_m, 10);
-    if (isNaN(lat) || lat < -90 || lat > 90) return res.status(400).json({ error: "center_lat invalid" });
-    if (isNaN(lng) || lng < -180 || lng > 180) return res.status(400).json({ error: "center_lng invalid" });
-    if (isNaN(r) || r < 1) return res.status(400).json({ error: "radius_m must be >= 1" });
-
-    await query(
-      `INSERT INTO lecture_halls (university_id, hall_name, building_name, floor_number, center_lat, center_lng, radius_m)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [uid, hn, bl || null, fn, lat, lng, r]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.delete("/admin/lecture-halls/:id", async (req, res) => {
-  try {
-    const { admin_user_id } = req.body || {};
-    const adminUserId = admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    await query("DELETE FROM lecture_halls WHERE id=?", [req.params.id]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-// ============================
-// Admin: timetable PDFs
-// ============================
-
-app.post("/admin/timetable-pdfs", timetableUpload.single("file"), async (req, res) => {
-  try {
-    const { admin_user_id, university_id, semester, year_number } = req.body || {};
-    if (!admin_user_id) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(admin_user_id);
-    const uid = parseInt(university_id, 10);
-    if (isNaN(uid)) return res.status(400).json({ error: "university_id is invalid" });
-    const sem = typeof semester === "string" ? semester.trim() : "";
-    if (!sem || sem.length > 50) return res.status(400).json({ error: "semester is required (max 50)" });
-    const yn = year_number != null ? parseInt(year_number, 10) : null;
-    if (yn != null && (isNaN(yn) || yn < 2000 || yn > 2100)) return res.status(400).json({ error: "year_number is invalid" });
-    if (!req.file) return res.status(400).json({ error: "PDF file is required" });
-    const allowed = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
-    if (!allowed.includes(req.file.mimetype)) {
-      return res.status(400).json({ error: "Only PDF or images (png/jpg/webp) are allowed" });
-    }
-
-    const filePath = req.file.path;
-    await query(
-      "INSERT INTO timetable_pdfs (university_id, semester, year_number, file_path, uploaded_by_admin_id, uploaded_by_user_id) VALUES (?, ?, ?, ?, ?, ?)",
-      [uid, sem, yn, filePath, admin_user_id ? parseInt(admin_user_id, 10) : null, null]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Upload failed" });
-  }
-});
-
-// Student uploads (attendance page)
-app.post("/attendance/timetable-pdfs", timetableUpload.single("file"), async (req, res) => {
-  try {
-    const { user_id, university_id, semester, year_number } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-    const role = await getUserRole(user_id);
-    if (role !== "student") return res.status(403).json({ error: "Only students can upload timetables" });
-
-    const uid = parseInt(university_id, 10);
-    if (isNaN(uid)) return res.status(400).json({ error: "university_id is invalid" });
-    const sem = typeof semester === "string" ? semester.trim() : "";
-    if (!sem || sem.length > 50) return res.status(400).json({ error: "semester is required (max 50)" });
-    const yn = year_number != null ? parseInt(year_number, 10) : null;
-    if (yn == null || isNaN(yn) || yn < 2000 || yn > 2100) return res.status(400).json({ error: "year_number is required and must be valid" });
-    if (!req.file) return res.status(400).json({ error: "File is required" });
-    const allowed = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
-    if (!allowed.includes(req.file.mimetype)) return res.status(400).json({ error: "Only PDF or images (png/jpg/webp) are allowed" });
-
-    const filePath = req.file.path;
-    await query(
-      "INSERT INTO timetable_pdfs (university_id, semester, year_number, file_path, uploaded_by_admin_id, uploaded_by_user_id) VALUES (?, ?, ?, ?, ?, ?)",
-      [uid, sem, yn, filePath, null, parseInt(user_id, 10)]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Upload failed" });
-  }
-});
-
-// Student: list uploaded timetables for dashboard
-app.get("/users/:id/timetables", async (req, res) => {
-  try {
-    const userId = parseInt(req.params.id, 10);
-    if (isNaN(userId)) return res.status(400).json({ error: "Invalid user id" });
-    const rows = await query(
-      `SELECT tp.id,
-              tp.university_id,
-              u.name AS university_name,
-              tp.semester,
-              tp.year_number,
-              tp.file_path,
-              tp.created_at
-       FROM timetable_pdfs tp
-       LEFT JOIN universities u ON u.id=tp.university_id
-       WHERE tp.uploaded_by_user_id=?
-       ORDER BY tp.created_at DESC
-       LIMIT 50`,
-      [userId]
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to load timetables" });
-  }
-});
-
-// Admin: view student timetables + schedule slots by email
-app.get("/admin/student-timetables", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const email = req.query.email ? String(req.query.email).trim() : "";
-    const users = email
-      ? await query("SELECT id, name, email FROM users WHERE email LIKE ? ORDER BY email ASC LIMIT 200", [`%${email}%`])
-      : await query("SELECT id, name, email FROM users ORDER BY created_at DESC LIMIT 200");
-
-    const out = [];
-    for (const u of users) {
-      const timetables = await query(
-        `SELECT tp.id, tp.university_id, un.name AS university_name, tp.semester, tp.year_number,
-                tp.file_path, tp.admin_review_status, tp.admin_review_note, tp.created_at
-         FROM timetable_pdfs tp
-         LEFT JOIN universities un ON un.id=tp.university_id
-         WHERE tp.uploaded_by_user_id=?
-         ORDER BY tp.created_at DESC
-         LIMIT 10`,
-        [u.id]
-      );
-
-      const slots = await query(
-        `SELECT id, university_id, semester, year_number, day_of_week, start_time, end_time,
-                module_name, delivery_mode, location_text, hall_id, verification_status, created_at
-         FROM schedule_slots
-         WHERE user_id=?
-         ORDER BY created_at DESC
-         LIMIT 50`,
-        [u.id]
-      );
-
-      out.push({ user: { id: u.id, name: u.name, email: u.email }, timetables, slots });
-    }
-
-    res.json(out);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.post("/admin/timetables/:id/review", async (req, res) => {
-  try {
-    const adminUserId = req.body?.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const ttId = parseInt(req.params.id, 10);
-    if (isNaN(ttId)) return res.status(400).json({ error: "Invalid timetable id" });
-    const status = req.body?.status === "approved" ? "approved" : req.body?.status === "rejected" ? "rejected" : "pending";
-    const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
-    await query("UPDATE timetable_pdfs SET admin_review_status=?, admin_review_note=? WHERE id=?", [status, note, ttId]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.get("/admin/timetable-pdfs", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const uniId = req.query.university_id ? parseInt(req.query.university_id, 10) : null;
-    const rows = uniId
-      ? await query("SELECT id, university_id, semester, year_number, file_path, created_at FROM timetable_pdfs WHERE university_id=? ORDER BY created_at DESC", [uniId])
-      : await query("SELECT id, university_id, semester, year_number, file_path, created_at FROM timetable_pdfs ORDER BY created_at DESC");
-    res.json(rows);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-// ============================
-// Concerns (student submit, admin view/forward)
-// ============================
-
-app.post("/concerns", async (req, res) => {
-  try {
-    const { user_id, university_id, category, message } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-    const uid = parseInt(university_id, 10);
-    if (isNaN(uid)) return res.status(400).json({ error: "university_id is invalid" });
-    const msg = typeof message === "string" ? message.trim() : "";
-    if (!msg || msg.length > 2000) return res.status(400).json({ error: "message is required (max 2000)" });
-    await query(
-      "INSERT INTO concerns (user_id, university_id, category, message) VALUES (?, ?, ?, ?)",
-      [user_id, uid, category ? String(category).trim().slice(0, 50) : null, msg]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "Concern submit failed" });
-  }
-});
-
-app.get("/users/:id/concerns", async (req, res) => {
-  try {
-    const rows = await query(
-      "SELECT c.id, c.university_id, c.category, c.message, c.status, c.created_at, c.forwarded_at FROM concerns c WHERE c.user_id=? ORDER BY c.created_at DESC",
-      [req.params.id]
-    );
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get("/admin/concerns", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const status = req.query.status ? String(req.query.status).trim() : null;
-    const rows = status
-      ? await query(
-          "SELECT c.id, c.user_id, u.name AS student_name, c.university_id, un.name AS university_name, c.category, c.message, c.status, c.created_at, c.forwarded_at FROM concerns c JOIN users u ON u.id=c.user_id JOIN universities un ON un.id=c.university_id WHERE c.status=? ORDER BY c.created_at DESC",
-          [status]
-        )
-      : await query(
-          "SELECT c.id, c.user_id, u.name AS student_name, c.university_id, un.name AS university_name, c.category, c.message, c.status, c.created_at, c.forwarded_at FROM concerns c JOIN users u ON u.id=c.user_id JOIN universities un ON un.id=c.university_id ORDER BY c.created_at DESC"
-        );
-    res.json(rows);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.post("/admin/concerns/:id/forward", async (req, res) => {
-  try {
-    const { admin_user_id } = req.body || {};
-    const adminUserId = admin_user_id || req.session?.userId;
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-    const concernId = parseInt(req.params.id, 10);
-    if (isNaN(concernId)) return res.status(400).json({ error: "Invalid concern id" });
-
-    const [concernRows] = await db.query(
-      "SELECT * FROM concerns WHERE id=?",
-      [concernId]
-    );
-    const concern = concernRows[0];
-    if (!concern) return res.status(404).json({ error: "Concern not found" });
-    if (concern.status === "forwarded") return res.json({ success: true, skipped: true });
-
-    const [uniRows] = await db.query("SELECT general_email FROM universities WHERE id=?", [concern.university_id]);
-    const uni = uniRows[0];
-    const to = uni?.general_email;
-    if (!to) return res.status(400).json({ error: "University general_email not configured" });
-
-    const subject = `UniNavigator Concern: ${concern.category || "Concern"}`;
-    const text = `Student ID: ${concern.user_id}\n\nMessage:\n${concern.message}`;
-
-    // Save forwarded state first so it isn't re-forwarded if email fails.
-    await query("UPDATE concerns SET status='forwarded', forwarded_at=NOW() WHERE id=?", [concernId]);
-
-    try {
-      await sendMail({ to, subject, text });
-    } catch (mailErr) {
-      // If SMTP not configured, we keep "forwarded" as per requirement and still show mail error in admin UI later.
-      await query(
-        "UPDATE concerns SET status='forwarded' WHERE id=?",
-        [concernId]
-      );
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Forward failed" });
-  }
-});
-
-// ============================
-// Usage analytics
-// ============================
-
-app.post("/analytics/event", async (req, res) => {
-  try {
-    const { user_id, event_type, page, meta } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-    const et = typeof event_type === "string" ? event_type.trim() : "";
-    if (!et || et.length > 50) return res.status(400).json({ error: "event_type is required (max 50)" });
-    const p = page ? String(page).slice(0, 100) : null;
-    const metaValue = meta && typeof meta === "object" ? JSON.stringify(meta) : meta || null;
-
-    await query(
-      "INSERT INTO usage_events (user_id, event_type, page, meta) VALUES (?, ?, ?, ?)",
-      [user_id, et, p, metaValue]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "Event insert failed" });
-  }
-});
-
-app.get("/admin/analytics/usage-summary", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    const days = Math.min(30, Math.max(1, parseInt(req.query.days || 7, 10)));
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const rows = await query(
-      `SELECT DATE(created_at) AS day, event_type, COUNT(*) AS count
-       FROM usage_events
-       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
-       GROUP BY day, event_type
-       ORDER BY day ASC`,
-      [days]
-    );
-    res.json({ days, rows });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Admin failed" });
-  }
-});
-
-app.get("/admin/analytics/usage-export-excel", async (req, res) => {
-  try {
-    const adminUserId = req.query.admin_user_id || req.session?.userId;
-    const days = Math.min(30, Math.max(1, parseInt(req.query.days || 7, 10)));
-    if (!adminUserId) return res.status(400).json({ error: "admin_user_id is required" });
-    await requireAdmin(adminUserId);
-
-    const rows = await query(
-      `SELECT DATE(created_at) AS day, event_type, page, COUNT(*) AS count
-       FROM usage_events
-       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
-       GROUP BY day, event_type, page
-       ORDER BY day ASC`,
-      [days]
-    );
-
-    const data = rows.map((r) => ({ Day: r.day, EventType: r.event_type, Page: r.page || "", Count: r.count }));
-    const sheet = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, sheet, "usage");
-    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-
-    res.setHeader("Content-Disposition", `attachment; filename=uninavigator-usage-${days}d.xlsx`);
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.send(buffer);
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || "Export failed" });
-  }
-});
-
-// ============================
-// PDF Report
-// ============================
-
-app.get("/users/:id/report.pdf", async (req, res) => {
-  const user_id = req.params.id;
-  const doc = new PDFDocument();
-  res.setHeader(
-    "Content-Disposition",
-    "attachment; filename=uninavigator-report.pdf"
-  );
-  doc.pipe(res);
-  doc.fontSize(20).text("UniNavigator Student Report");
-
-  try {
-    const [users] = await db.query("SELECT * FROM users WHERE id=?", [
-      user_id,
-    ]);
-    if (users.length) {
-      doc.moveDown();
-      doc.text(`Student: ${users[0].name}`);
-      doc.text(`Email: ${users[0].email}`);
-    }
-    const modules = await query("SELECT * FROM modules WHERE user_id=?", [
-      user_id,
-    ]);
-    doc.moveDown();
-    doc.text("Modules");
-    modules.forEach((m) => {
-      doc.text(
-        `${m.name} | Credits:${m.credits} | Grade:${m.grade_letter || "-"}`
-      );
-    });
-    const attendance = await query("SELECT * FROM attendance WHERE user_id=?", [
-      user_id,
-    ]);
-    doc.moveDown();
-    doc.text("Attendance");
-    attendance.forEach((a) => {
-      const percent = Math.round(
-        (a.attended / (a.total_sessions || 1)) * 100
-      );
-      doc.text(`${a.module_name} : ${percent}%`);
-    });
-  } catch (err) {
-    doc.text("Error loading data.");
-  }
-  doc.end();
 });
 
 // ============================
