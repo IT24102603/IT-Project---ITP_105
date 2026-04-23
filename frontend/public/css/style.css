@@ -826,6 +826,53 @@ tr:hover td {
   margin-bottom: 0.5rem;
 }
 
+.goal-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.goal-item {
+  background: var(--bg-card);
+  padding: 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.goal-item .label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.goal-item .value {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.goal-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 1rem;
+  font-style: italic;
+}
+
+.semester-container {
+  margin: 2rem 0;
+}
+
+.semester-section {
+  margin-bottom: 2rem;
+}
+
+.semester-section h3 {
+  color: var(--accent);
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+}
+
 .subtitle.small {
   font-size: 0.9rem;
   margin-bottom: 1rem;

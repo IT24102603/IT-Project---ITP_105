@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS timetable_pdfs (
   id INT AUTO_INCREMENT PRIMARY KEY,
   university_id INT NOT NULL,
   semester VARCHAR(50) NOT NULL,
+  academic_year INT DEFAULT NULL,
+  semester_number INT DEFAULT NULL,
   year_number INT DEFAULT NULL,
   file_path TEXT NOT NULL,
   uploaded_by_admin_id INT DEFAULT NULL,
@@ -79,14 +81,20 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE TABLE IF NOT EXISTS modules (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NOT NULL,
+  university_id INT DEFAULT NULL,
+  academic_year INT DEFAULT NULL,
+  semester_in_year INT DEFAULT NULL,
+  source_type VARCHAR(30) NOT NULL DEFAULT 'normal',
   name VARCHAR(255) NOT NULL,
   code VARCHAR(50) DEFAULT NULL,
   credits INT NOT NULL DEFAULT 3,
   grade_letter VARCHAR(5) DEFAULT NULL,
   grade_point DECIMAL(3,2) DEFAULT NULL,
+  ca_percentage INT DEFAULT NULL,
   semester INT DEFAULT 1,
   is_repeat TINYINT(1) DEFAULT 0,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (university_id) REFERENCES universities(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS attendance (
@@ -123,6 +131,7 @@ CREATE TABLE IF NOT EXISTS schedule_slots (
   user_id INT NOT NULL,
   university_id INT NOT NULL,
   semester INT DEFAULT NULL,
+  academic_year INT DEFAULT NULL,
   year_number INT DEFAULT NULL,
   day_of_week VARCHAR(15) NOT NULL,
   start_time VARCHAR(10) NOT NULL,
@@ -142,6 +151,7 @@ CREATE TABLE IF NOT EXISTS schedule_slots (
 CREATE TABLE IF NOT EXISTS tasks (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NOT NULL,
+  module_code VARCHAR(50) DEFAULT NULL,
   title VARCHAR(500) NOT NULL,
   due_date DATE DEFAULT NULL,
   priority_score INT DEFAULT 5,
