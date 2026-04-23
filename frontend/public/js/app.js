@@ -33,6 +33,22 @@
 
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+  function parsePositiveInt(value, fallback = null) {
+    const n = parseInt(value, 10);
+    if (isNaN(n) || n < 1) return fallback;
+    return n;
+  }
+
+  function normalizeCode(code) {
+    return (code || "").trim().toUpperCase();
+  }
+
+  function isGradeBelowC(gradeLetter) {
+    if (!gradeLetter) return false;
+    const gp = GRADE_POINTS[gradeLetter];
+    return gp != null && gp < 2.0;
+  }
+
   function showFormError(formOrId, msg) {
     const el = typeof formOrId === "string" ? document.getElementById(formOrId) : formOrId;
     if (!el) return;
@@ -95,236 +111,7 @@
     await fetch(API + url, { method: "DELETE", credentials: "include" });
   }
 
-  // ==============================
-  // Usage analytics helpers
-  // ==============================
-
-  async function trackUsage(event_type, page, meta) {
-    if (!currentUser) return;
-    const payload = {
-      user_id: currentUser.id,
-      event_type,
-      page: page || null,
-      meta: meta || null,
-    };
-    try {
-      await fetch(API + "/analytics/event", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: true,
-        credentials: "include",
-      });
-    } catch (_) {}
-  }
-
-  // Distance between lat/lng points (meters)
-  function haversineMeters(lat1, lon1, lat2, lon2) {
-    const R = 6371000; // earth radius
-    const toRad = (d) => (d * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
-
-  // ==============================
-  // Auth & Navigation
-  // ==============================
-
-  async function login(e) {
-    e.preventDefault();
-    const email = document.getElementById("login-email").value?.trim() || "";
-    const password = document.getElementById("login-password").value || "";
-    const authError = document.getElementById("auth-error");
-    if (authError) authError.classList.add("hidden");
-    if (!email || !password) {
-      if (authError) { authError.textContent = "Email and password are required"; authError.classList.remove("hidden"); }
-      return;
-    }
-    const user = await post("/login", { email, password });
-    if (!user || user.error) {
-      const el = document.getElementById("auth-error");
-      if (el) { el.textContent = user?.error || "Invalid login"; el.classList.remove("hidden"); }
-      return;
-    }
-    currentUser = user;
-    showApp();
-  }
-
-  async function tryResumeSession() {
-    try {
-      const res = await get("/me");
-      if (res && res.user && res.user.id) {
-        currentUser = res.user;
-        showApp();
-      }
-    } catch (_) {}
-  }
-
-  async function register(e) {
-    e.preventDefault();
-    const name = (document.getElementById("reg-name").value || "").trim();
-    const email = (document.getElementById("reg-email").value || "").trim();
-    const password = document.getElementById("reg-password").value || "";
-    const regError = document.getElementById("register-error");
-    if (regError) regError.classList.add("hidden");
-    if (!name || name.length > 255) {
-      if (regError) { regError.textContent = "Name is required (1–255 characters)"; regError.classList.remove("hidden"); }
-      return;
-    }
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!email || !emailRegex.test(email)) {
-      if (regError) { regError.textContent = "Enter a valid email address"; regError.classList.remove("hidden"); }
-      return;
-    }
-    if (!password || password.length < 6) {
-      if (regError) { regError.textContent = "Password must be at least 6 characters"; regError.classList.remove("hidden"); }
-      return;
-    }
-    const result = await post("/register", { name, email, password });
-    if (result.error) {
-      const el = document.getElementById("register-error");
-      if (el) { el.textContent = result.error; el.classList.remove("hidden"); }
-      return;
-    }
-    alert("Registration successful! Sign in with your email.");
-    document.getElementById("show-login").click();
-  }
-
-  const deadlineNotifiedIds = new Set();
-
-  function showApp() {
-    document.getElementById("auth-screen").classList.add("hidden");
-    document.getElementById("register-screen").classList.add("hidden");
-    document.getElementById("app").classList.remove("hidden");
-
-    const sidebarName = document.getElementById("sidebar-name");
-    const sidebarEmail = document.getElementById("sidebar-email");
-    if (sidebarName) sidebarName.textContent = currentUser.name || "Student";
-    if (sidebarEmail) sidebarEmail.textContent = currentUser.email || "";
-
-    const isAdmin = currentUser?.role === "admin";
-    document.querySelectorAll(".admin-only").forEach((el) => {
-      el.classList.toggle("hidden", !isAdmin);
-    });
-    document.querySelectorAll(".student-only").forEach((el) => {
-      el.classList.toggle("hidden", isAdmin);
-    });
-
-    initNavigation();
-
-    if (isAdmin) {
-      showPage("admin-dashboard");
-      loadAdminDashboard();
-      loadAdminUsers();
-      loadAdminUniversitiesForHalls();
-      loadAdminConcerns();
-      // Timetable uploads are handled by students only
-      loadAdminUsage();
-    } else {
-      loadDashboard();
-      loadAttendance();
-      loadRepeat();
-      loadTasks();
-      showPage("dashboard");
-      checkUpcomingDeadlines();
-      if (window.deadlineCheckInterval) clearInterval(window.deadlineCheckInterval);
-      window.deadlineCheckInterval = setInterval(checkUpcomingDeadlines, 30 * 60 * 1000);
-    }
-  }
-
-  function showDeadlinePrefsSaved() {
-    const el = document.getElementById("save-notification-prefs");
-    if (!el) return;
-    const orig = el.textContent;
-    el.textContent = "Saved!";
-    setTimeout(() => { el.textContent = orig; }, 1500);
-  }
-
-  async function checkUpcomingDeadlines() {
-    if (!currentUser || currentUser.notify_deadlines === false) return;
-    const days = Math.min(30, Math.max(1, parseInt(currentUser.deadline_reminder_days, 10) || 3));
-    let tasks = [];
-    try {
-      tasks = await get("/users/" + currentUser.id + "/tasks");
-    } catch (_) {}
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const upcoming = tasks.filter((t) => {
-      if (t.completed || !t.due_date) return false;
-      const due = new Date(t.due_date);
-      due.setHours(0, 0, 0, 0);
-      const diffDays = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
-      return diffDays >= 0 && diffDays <= days;
-    });
-    if (upcoming.length === 0) {
-      const banner = document.getElementById("deadline-alert-banner");
-      if (banner) { banner.classList.add("hidden"); banner.innerHTML = ""; }
-      return;
-    }
-    const toNotify = upcoming.filter((t) => !deadlineNotifiedIds.has(t.id));
-    const banner = document.getElementById("deadline-alert-banner");
-    if (banner) {
-      banner.classList.remove("hidden");
-      const list = upcoming.slice(0, 5).map((t) => {
-        const due = new Date(t.due_date);
-        const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
-        const dayText = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff + " days";
-        return `<span class="deadline-alert-item">${t.title} — ${dayText}</span>`;
-      }).join("");
-      banner.innerHTML = `<span class="deadline-alert-icon">⏰</span><span class="deadline-alert-msg">Deadlines soon: ${list}</span><a href="#" data-page="tasks" class="deadline-alert-link">View tasks</a>`;
-      banner.querySelector(".deadline-alert-link")?.addEventListener("click", (e) => { e.preventDefault(); showPage("tasks"); });
-    }
-    if (toNotify.length > 0 && "Notification" in window && Notification.permission === "granted") {
-      toNotify.forEach((t) => {
-        deadlineNotifiedIds.add(t.id);
-        const due = new Date(t.due_date);
-        const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
-        const when = diff === 0 ? "today" : diff === 1 ? "tomorrow" : "in " + diff + " days";
-        new Notification("UniNavigator: Deadline soon", { body: t.title + " is due " + when, icon: "/favicon.ico" });
-      });
-    } else if (toNotify.length > 0) {
-      toNotify.forEach((t) => deadlineNotifiedIds.add(t.id));
-    }
-  }
-
-  function showPage(pageId) {
-    document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
-    document.querySelectorAll(".nav-link").forEach((l) => l.classList.remove("active"));
-    const page = document.getElementById("page-" + pageId);
-    const link = document.querySelector('.nav-link[data-page="' + pageId + '"]');
-    if (page) page.classList.add("active");
-    if (link) link.classList.add("active");
-
-    trackUsage("page_view", pageId);
-
-    if (pageId === "gpa") loadGpaPage();
-    if (pageId === "attendance") loadAttendancePage();
-    if (pageId === "tasks") loadTasks();
-    if (pageId === "repeat") loadRepeat();
-    if (pageId === "concerns") loadConcernsPage();
-
-    if (pageId === "admin-dashboard") loadAdminDashboard();
-    if (pageId === "admin-users") loadAdminUsers();
-    if (pageId === "admin-halls") loadAdminHallsPage();
-    if (pageId === "admin-concerns") loadAdminConcerns();
-    if (pageId === "admin-usage") loadAdminUsage();
-    if (pageId === "admin-attendance-queue") loadAdminAttendanceQueue();
-  }
-
-  function initNavigation() {
-    document.querySelectorAll(".nav-link[data-page]").forEach((link) => {
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        showPage(link.getAttribute("data-page"));
-      });
-    });
-  }
-
+ 
   // ==============================
   // Dashboard (Profile + Report + Goals + GPA)
   // ==============================
@@ -366,103 +153,6 @@
     document.getElementById("dashboard-target-attendance").textContent = targetAtt + "%";
     document.getElementById("dashboard-module-count").textContent = moduleCount;
 
-    // Notification (deadline alerts) prefs
-    const notifyCheckbox = document.getElementById("notify-deadlines-checkbox");
-    const reminderDaysSelect = document.getElementById("deadline-reminder-days");
-    const saveNotifBtn = document.getElementById("save-notification-prefs");
-    if (notifyCheckbox) notifyCheckbox.checked = profile.notify_deadlines !== false && currentUser.notify_deadlines !== false;
-    if (reminderDaysSelect) reminderDaysSelect.value = String(profile.deadline_reminder_days || currentUser.deadline_reminder_days || 3);
-    if (saveNotifBtn) {
-      saveNotifBtn.onclick = async () => {
-        const enabled = notifyCheckbox ? notifyCheckbox.checked : true;
-        const days = reminderDaysSelect ? parseInt(reminderDaysSelect.value, 10) : 3;
-        if (enabled && "Notification" in window && Notification.permission === "default") {
-          await Notification.requestPermission();
-        }
-        await put("/users/" + currentUser.id + "/profile", { notify_deadlines: enabled, deadline_reminder_days: days });
-        currentUser.notify_deadlines = enabled;
-        currentUser.deadline_reminder_days = days;
-        showDeadlinePrefsSaved();
-      };
-    }
-
-    // Goals edit
-    const editBtn = document.getElementById("edit-goals-btn");
-    const editFields = document.getElementById("goals-edit-fields");
-    const saveBtn = document.getElementById("save-goals-btn");
-    if (editBtn && editFields) {
-      editBtn.onclick = () => {
-        editFields.classList.toggle("hidden");
-        if (!editFields.classList.contains("hidden")) {
-          document.getElementById("edit-target-gpa").value = targetGpa !== "–" ? targetGpa : "";
-          document.getElementById("edit-target-attendance").value = targetAtt !== "–" ? targetAtt : 80;
-        }
-      };
-    }
-    if (saveBtn) {
-      saveBtn.onclick = async () => {
-        const tg = parseFloat(document.getElementById("edit-target-gpa").value);
-        const ta = parseInt(document.getElementById("edit-target-attendance").value, 10);
-        if (!isNaN(tg) && (tg < 0 || tg > 4)) {
-          alert("Target GPA must be between 0 and 4");
-          return;
-        }
-        if (!isNaN(ta) && (ta < 0 || ta > 100)) {
-          alert("Target attendance must be between 0 and 100");
-          return;
-        }
-        const res = await put("/users/" + currentUser.id + "/profile", {
-          target_gpa: isNaN(tg) ? null : tg,
-          target_attendance: isNaN(ta) ? 80 : ta,
-        });
-        if (res && res.error) {
-          alert(res.error);
-          return;
-        }
-        currentUser.target_gpa = tg;
-        currentUser.target_attendance = ta;
-        editFields.classList.add("hidden");
-        loadDashboard();
-      };
-    }
-
-    // Profile picture upload
-    const uploadPic = document.getElementById("upload-pic");
-    if (uploadPic) {
-      uploadPic.onchange = async (e) => {
-        const file = e.target.files?.[0];
-        if (!file || !file.type.startsWith("image/")) return;
-        const reader = new FileReader();
-        reader.onload = async () => {
-          const base64 = reader.result;
-          await put("/users/" + currentUser.id + "/profile", { profile_pic: base64 });
-          currentUser.profile_pic = base64;
-          if (picEl) picEl.src = base64;
-        };
-        reader.readAsDataURL(file);
-      };
-    }
-
-    // GPA line chart
-    const labels = (gpaData.modules || [])
-      .filter((m) => m.grade_point != null)
-      .map((m) => m.name);
-    const grades = (gpaData.modules || [])
-      .filter((m) => m.grade_point != null)
-      .map((m) => parseFloat(m.grade_point));
-
-    const gpaCtx = document.getElementById("gpaChart");
-    if (gpaCtx) {
-      if (gpaChart) gpaChart.destroy();
-      gpaChart = new Chart(gpaCtx, {
-        type: "line",
-        data: {
-          labels,
-          datasets: [{ label: "Grade Points", data: grades, borderColor: "#00c9a7", tension: 0.2 }],
-        },
-        options: { responsive: true, maintainAspectRatio: true },
-      });
-    }
 
     // Dashboard attendance chart (from attendance logs: includes delivery_mode)
     const attData = await get("/users/" + currentUser.id + "/attendance-logs").catch(() => []);
@@ -529,164 +219,14 @@
                 <tr>
                   <td>${t.university_name || "—"}</td>
                   <td>${t.semester || "—"}</td>
-                  <td>${t.year_number || "—"}</td>
-                  <td>${fileUrl ? `<a href="${fileUrl}" target="_blank">Open</a>` : "—"}</td>
+                  <td>${t.academic_year || t.year_number || "—"}</td>
+                  <td>${fileUrl ? `<a href="${fileUrl}" target="_blank">View PDF</a> | <a href="${fileUrl}" target="_blank" download>Download</a>` : "—"}</td>
                   <td>${t.created_at ? String(t.created_at).slice(0, 10) : "—"}</td>
                 </tr>
               `;
             })
             .join("")
         : "<tr><td colspan=\"5\">No timetable uploads yet</td></tr>";
-    }
-  }
-
-  // ==============================
-  // GPA Calculator + Goal Planner
-  // ==============================
-
-  async function loadGpaPage() {
-    if (!currentUser) return;
-    const gpaData = await get("/users/" + currentUser.id + "/gpa");
-    const modules = gpaData.modules || [];
-
-    const cards = document.getElementById("gpa-summary-cards");
-    const cgpa = gpaData.overall?.gpa ?? 0;
-    cards.innerHTML = `
-      <div class="card"><div class="label">Current GPA</div><div class="value">${cgpa}</div></div>
-      <div class="card"><div class="label">Modules</div><div class="value">${modules.length}</div></div>
-    `;
-
-    const tbody = document.getElementById("gpa-modules-tbody");
-    tbody.innerHTML = modules
-      .map(
-        (m) =>
-          `<tr>
-            <td>${m.name}</td><td>${m.code || "–"}</td><td>${m.credits}</td><td>${m.grade_letter || "–"}</td>
-            <td><button type="button" class="btn btn-ghost btn-small" data-delete-module="${m.id}">Delete</button></td>
-          </tr>`
-      )
-      .join("");
-
-    tbody.querySelectorAll("[data-delete-module]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        await del("/modules/" + btn.getAttribute("data-delete-module"));
-        loadGpaPage();
-      });
-    });
-
-    // Prefill goal planner with current totals
-    let totalCredits = 0;
-    let totalPoints = 0;
-    modules.forEach((m) => {
-      if (m.grade_point != null) {
-        totalCredits += m.credits;
-        totalPoints += m.grade_point * m.credits;
-      }
-    });
-    const completedCredits = document.getElementById("completed-credits-input");
-    const currentPoints = document.getElementById("current-points-input");
-    if (completedCredits) completedCredits.value = totalCredits;
-    if (currentPoints) currentPoints.value = totalPoints.toFixed(2);
-  }
-
-  function initGpaFormAndGoalPlanner() {
-    const form = document.getElementById("gpa-add-form");
-    if (form) {
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const name = (document.getElementById("gpa-mod-name").value || "").trim();
-        const code = (document.getElementById("gpa-mod-code").value || "").trim();
-        const credits = parseInt(document.getElementById("gpa-mod-credits").value, 10);
-        const gradeLetter = document.getElementById("gpa-mod-grade").value;
-        const semester = parseInt(document.getElementById("gpa-mod-semester").value, 10) || 1;
-        const grade_point = gradeLetter ? (GRADE_POINTS[gradeLetter] ?? null) : null;
-
-        if (!name || name.length > 255) {
-          alert("Module name is required (1–255 characters)");
-          return;
-        }
-        if (isNaN(credits) || credits < 1 || credits > 30) {
-          alert("Credits must be between 1 and 30");
-          return;
-        }
-        if (semester < 1 || semester > 20) {
-          alert("Semester must be between 1 and 20");
-          return;
-        }
-
-        const res = await post("/modules", {
-          user_id: currentUser.id,
-          name,
-          code,
-          credits,
-          grade_letter: gradeLetter || null,
-          grade_point,
-          semester,
-        });
-        if (res && res.error) {
-          alert(res.error);
-          return;
-        }
-        form.reset();
-        document.getElementById("gpa-mod-semester").value = 1;
-        loadGpaPage();
-        trackUsage("module_add", "gpa", { credits, semester });
-      });
-    }
-
-    const calcBtn = document.getElementById("calculate-goal-btn");
-    const resultEl = document.getElementById("goal-planner-result");
-    if (calcBtn && resultEl) {
-      calcBtn.addEventListener("click", () => {
-        const targetGpa = parseFloat(document.getElementById("target-gpa-input").value);
-        const totalCredits = parseFloat(document.getElementById("total-credits-input").value);
-        const completedCredits = parseFloat(document.getElementById("completed-credits-input").value) || 0;
-        const currentPoints = parseFloat(document.getElementById("current-points-input").value) || 0;
-
-        if (isNaN(targetGpa) || isNaN(totalCredits) || totalCredits < 1) {
-          resultEl.innerHTML = "<p>Please enter a valid target GPA and total credits.</p>";
-          resultEl.classList.remove("hidden");
-          return;
-        }
-
-        const remainingCredits = totalCredits - completedCredits;
-        if (remainingCredits <= 0) {
-          resultEl.innerHTML = "<p>No remaining credits. Your GPA is already fixed from completed modules.</p>";
-          resultEl.classList.remove("hidden");
-          return;
-        }
-
-        const totalPointsNeeded = targetGpa * totalCredits;
-        const pointsNeededFromRemaining = totalPointsNeeded - currentPoints;
-        const requiredAvgPerCredit = pointsNeededFromRemaining / remainingCredits;
-
-        let letterHint = "–";
-        for (const [letter, gp] of Object.entries(GRADE_POINTS)) {
-          if (Math.abs(gp - requiredAvgPerCredit) < 0.2) {
-            letterHint = letter;
-            break;
-          }
-        }
-        if (letterHint === "–") {
-          if (requiredAvgPerCredit >= 3.85) letterHint = "A or A+";
-          else if (requiredAvgPerCredit >= 3.5) letterHint = "A-";
-          else if (requiredAvgPerCredit >= 3.2) letterHint = "B+";
-          else if (requiredAvgPerCredit >= 2.8) letterHint = "B";
-          else if (requiredAvgPerCredit >= 2.5) letterHint = "B-";
-          else if (requiredAvgPerCredit >= 2.0) letterHint = "C+ / C";
-          else if (requiredAvgPerCredit >= 1.0) letterHint = "D";
-          else letterHint = "E / F";
-        }
-
-        resultEl.innerHTML = `
-          <h4>Required performance</h4>
-          <p><strong>Remaining credits:</strong> ${remainingCredits}</p>
-          <p><strong>Points needed from remaining modules:</strong> ${pointsNeededFromRemaining.toFixed(2)}</p>
-          <p><strong>Average grade point per remaining credit:</strong> <span class="value">${requiredAvgPerCredit.toFixed(2)}</span></p>
-          <p><strong>Approximate letter grade needed:</strong> ${letterHint}</p>
-        `;
-        resultEl.classList.remove("hidden");
-      });
     }
   }
 
@@ -706,6 +246,7 @@
     const attendance = attendanceLogs || [];
 
     const uniSelect = document.getElementById("attendance-university-select");
+    const addModuleUniSelect = document.getElementById("attendance-module-university");
     if (uniSelect) {
       uniSelect.innerHTML =
         '<option value="">Select university</option>' +
@@ -715,18 +256,52 @@
       selectedAttendanceUniversityId = attendanceUniversities.length ? attendanceUniversities[0].id : null;
       if (selectedAttendanceUniversityId) uniSelect.value = String(selectedAttendanceUniversityId);
     }
+    if (addModuleUniSelect) {
+      addModuleUniSelect.innerHTML =
+        '<option value="">Select university</option>' +
+        attendanceUniversities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
+      if (selectedAttendanceUniversityId) addModuleUniSelect.value = String(selectedAttendanceUniversityId);
+    }
 
     const hallsSummaryEl = document.getElementById("attendance-halls-summary");
     const hallSelect = document.getElementById("attendance-hall-select");
 
-    const select = document.getElementById("attendance-module-select");
-    select.innerHTML = '<option value="">Select module</option>' + modules.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
+    function filterModulesByYearSem() {
+      const ay = parsePositiveInt(document.getElementById("attendance-slot-year")?.value);
+      const sem = parsePositiveInt(document.getElementById("attendance-slot-semester")?.value);
+      return (modules || []).filter((m) => {
+        const my = parsePositiveInt(m.academic_year);
+        const ms = parsePositiveInt(m.semester_in_year);
+        if (!ay || !sem) return true;
+        return my === ay && ms === sem;
+      });
+    }
 
-    const slotModuleSelect = document.getElementById("attendance-slot-module-select");
-    if (slotModuleSelect) {
-      slotModuleSelect.innerHTML =
-        '<option value="">Select module</option>' +
-        modules.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
+    function renderAttendanceModuleDropdowns() {
+      const filtered = filterModulesByYearSem();
+      const select = document.getElementById("attendance-module-select");
+      if (select) {
+        select.innerHTML =
+          '<option value="">Select module</option>' +
+          filtered.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
+      }
+      const slotModuleSelect = document.getElementById("attendance-slot-module-select");
+      if (slotModuleSelect) {
+        slotModuleSelect.innerHTML =
+          '<option value="">Select module</option>' +
+          filtered.map((m) => `<option value="${m.name}">${m.name}${m.code ? " (" + m.code + ")" : ""}</option>`).join("");
+      }
+    }
+    renderAttendanceModuleDropdowns();
+    const slotSemSel = document.getElementById("attendance-slot-semester");
+    const slotYearSel = document.getElementById("attendance-slot-year");
+    if (slotSemSel && !slotSemSel.dataset.moduleFilterBound) {
+      slotSemSel.dataset.moduleFilterBound = "1";
+      slotSemSel.addEventListener("change", renderAttendanceModuleDropdowns);
+    }
+    if (slotYearSel && !slotYearSel.dataset.moduleFilterBound) {
+      slotYearSel.dataset.moduleFilterBound = "1";
+      slotYearSel.addEventListener("change", renderAttendanceModuleDropdowns);
     }
 
     const tbody = document.getElementById("attendance-table");
@@ -760,7 +335,7 @@
         options: { responsive: true, maintainAspectRatio: true },
       });
     }
-
+//GEOFENCE COORDIBNTION
     // Load halls for selected university (circle geofences)
     async function loadSelectedHalls() {
       if (!selectedAttendanceUniversityId) {
@@ -815,6 +390,7 @@
     const slotYear = document.getElementById("attendance-slot-year");
     if (slotSem && timetableSemester) slotSem.value = timetableSemester;
     if (slotYear && timetableYear) slotYear.value = timetableYear;
+    renderAttendanceModuleDropdowns();
   }
 
   async function loadAttendance() {
@@ -838,8 +414,8 @@
 
         if (!universityId) return alert("Select a university first.");
         if (!semester.trim()) return alert("Enter semester.");
-        if (!yearNumber || isNaN(parseInt(yearNumber, 10))) return alert("Enter a valid year.");
-        if (!file) return alert("Select a PDF or image file.");
+        if (!yearNumber || isNaN(parseInt(yearNumber, 10))) return alert("Enter a valid academic year.");
+        if (!file) return alert("Select a PDF file.");
 
         const fd = new FormData();
         fd.append("user_id", currentUser.id);
@@ -939,9 +515,9 @@
         slotSelect.innerHTML = '<option value="">Select slot</option>';
         return;
       }
-      const yearNumber = new Date(lectureDate + "T00:00:00").getFullYear();
+      const yearNumber = parsePositiveInt(document.getElementById("attendance-academic-year")?.value);
       const day = dayOfWeekFromDate(lectureDate);
-      if (!day) {
+      if (!day || !yearNumber) {
         slotSelect.innerHTML = '<option value="">Select slot</option>';
         return;
       }
@@ -1034,6 +610,11 @@
       semesterEl.dataset.bound = "1";
       semesterEl.addEventListener("change", () => refreshAttendanceSlotSelect());
     }
+    const academicYearEl = document.getElementById("attendance-academic-year");
+    if (academicYearEl && !academicYearEl.dataset.bound) {
+      academicYearEl.dataset.bound = "1";
+      academicYearEl.addEventListener("change", () => refreshAttendanceSlotSelect());
+    }
     const uniSel = document.getElementById("attendance-university-select");
     if (uniSel && !uniSel.dataset.boundSlots) {
       uniSel.dataset.boundSlots = "1";
@@ -1048,21 +629,31 @@
     refreshAttendanceSlotSelect();
 
     const addModuleForm = document.getElementById("attendance-add-module-form");
-    if (addModuleForm) {
+    if (addModuleForm && !addModuleForm.dataset.bound) {
+      addModuleForm.dataset.bound = "1";
       addModuleForm.addEventListener("submit", async (e) => {
         e.preventDefault();
+        const universityId = document.getElementById("attendance-module-university")?.value || "";
+        const academicYear = parsePositiveInt(document.getElementById("attendance-module-academic-year")?.value);
+        const semesterInYear = parsePositiveInt(document.getElementById("attendance-module-semester-in-year")?.value);
         const name = (document.getElementById("attendance-module-name").value || "").trim();
-        const code = (document.getElementById("attendance-module-code").value || "").trim();
+        const code = normalizeCode(document.getElementById("attendance-module-code").value || "");
+        if (!universityId) return alert("Select university.");
+        if (!academicYear || !semesterInYear) return alert("Enter academic year and semester.");
         if (!name || name.length > 255) {
           alert("Module name is required (1–255 characters)");
           return;
         }
+        if (!code) return alert("Module code is required.");
         const res = await post("/modules", {
           user_id: currentUser.id,
+          university_id: universityId,
+          academic_year: academicYear,
+          semester_in_year: semesterInYear,
           name,
           code,
           credits: 3,
-          semester: 1,
+          semester: (academicYear - 1) * 2 + semesterInYear,
         });
         if (res && res.error) {
           alert(res.error);
@@ -1096,6 +687,7 @@
         const total_sessions = parseInt(document.getElementById("attendance-total").value, 10) || 0;
         const attended = parseInt(document.getElementById("attendance-attended").value, 10) || 0;
         const semester = parseInt(document.getElementById("attendance-semester").value, 10) || null;
+        const academic_year = parseInt(document.getElementById("attendance-academic-year").value, 10) || null;
         const delivery_mode = document.getElementById("attendance-delivery-mode")?.value || "offline";
         const hall_id = document.getElementById("attendance-hall-select")?.value || "";
         const lecture_date = document.getElementById("attendance-lecture-date")?.value || "";
@@ -1136,6 +728,7 @@
         fd.append("attended", attended);
         fd.append("total_sessions", total_sessions);
         if (semester != null) fd.append("semester", semester);
+        if (academic_year != null) fd.append("academic_year", academic_year);
         fd.append("delivery_mode", delivery_mode);
         if (selectedAttendanceUniversityId) fd.append("university_id", selectedAttendanceUniversityId);
         if (hall_id) fd.append("hall_id", hall_id);
@@ -1166,124 +759,20 @@
   }
 
   // ==============================
-  // Task Planner (chart: target vs current)
-  // ==============================
-
-  async function loadTasks() {
-    if (!currentUser) return;
-    const tasks = await get("/users/" + currentUser.id + "/tasks");
-    tasks.sort((a, b) => {
-      const pa = parseInt(a.priority_score, 10) || 0;
-      const pb = parseInt(b.priority_score, 10) || 0;
-      if (pa !== pb) return pb - pa; // highest priority first
-      const da = a.due_date ? String(a.due_date) : "9999-12-31";
-      const db = b.due_date ? String(b.due_date) : "9999-12-31";
-      return da < db ? -1 : da > db ? 1 : 0;
-    });
-
-    const listEl = document.getElementById("tasks-list");
-    listEl.innerHTML = tasks.length
-      ? tasks
-          .map(
-            (t) => `
-          <div class="card" style="margin-bottom:0.5rem; display:flex; align-items:center; justify-content:space-between;">
-            <div>
-              <span style="text-decoration:${t.completed ? "line-through" : "none"}">${t.title}</span>
-              ${t.due_date ? `<span class="text-muted">Due: ${t.due_date}</span>` : ""}
-              <span class="badge badge-${t.priority_score >= 8 ? "high" : t.priority_score >= 5 ? "medium" : "low"}">P${t.priority_score}</span>
-            </div>
-            <div class="actions">
-              <button type="button" class="btn btn-ghost btn-small" data-task-toggle="${t.id}" data-completed="${t.completed}">${t.completed ? "Undo" : "Complete"}</button>
-              <button type="button" class="btn btn-ghost btn-small" data-task-delete="${t.id}">Delete</button>
-            </div>
-          </div>`
-          )
-          .join("")
-      : '<p class="empty-state">No tasks yet. Add one above.</p>';
-
-    listEl.querySelectorAll("[data-task-toggle]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-task-toggle");
-        const completed = btn.getAttribute("data-completed") === "1";
-        const newCompleted = !completed;
-        await patch("/tasks/" + id, { completed: newCompleted });
-        loadTasks();
-        trackUsage(newCompleted ? "task_complete" : "task_uncomplete", "tasks", { task_id: id });
-      });
-    });
-    listEl.querySelectorAll("[data-task-delete]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-task-delete");
-        await del("/tasks/" + id);
-        loadTasks();
-        trackUsage("task_delete", "tasks", { task_id: id });
-      });
-    });
-
-    const completedCount = tasks.filter((t) => t.completed).length;
-    const totalCount = tasks.length;
-    const ctx = document.getElementById("tasksChart");
-    if (ctx) {
-      if (tasksChart) tasksChart.destroy();
-      tasksChart = new Chart(ctx, {
-        type: "bar",
-        data: {
-          labels: ["Completed", "Remaining"],
-          datasets: [
-            {
-              label: "Tasks",
-              data: [completedCount, Math.max(0, totalCount - completedCount)],
-              backgroundColor: ["#10b981", "#2d3a4f"],
-            },
-          ],
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: true,
-          plugins: { title: { display: true, text: "Target: complete all tasks | Current: " + completedCount + " / " + totalCount } },
-        },
-      });
-    }
-  }
-
-  function initTasksForm() {
-    const form = document.getElementById("task-add-form");
-    if (form) {
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const title = (document.getElementById("task-title").value || "").trim();
-        const due_date = document.getElementById("task-due-date").value || null;
-        const priority_score = parseInt(document.getElementById("task-priority").value, 10) || 5;
-        if (!title || title.length > 500) {
-          alert("Task title is required (1–500 characters)");
-          return;
-        }
-        if (priority_score < 1 || priority_score > 10) {
-          alert("Priority must be between 1 and 10");
-          return;
-        }
-        const res = await post("/tasks", { user_id: currentUser.id, title, due_date, priority_score });
-        if (res && res.error) {
-          alert(res.error);
-          return;
-        }
-        form.reset();
-        document.getElementById("task-priority").value = 5;
-        loadTasks();
-        trackUsage("task_add", "tasks", { due_date });
-      });
-    }
-  }
-
-  // ==============================
   // Repeat & Improvement (charts, record improvement, remove entries)
   // ==============================
 
   async function loadRepeat() {
     if (!currentUser) return;
-    const modules = await get("/users/" + currentUser.id + "/modules");
+    const [modules, universities] = await Promise.all([
+      get("/users/" + currentUser.id + "/modules"),
+      get("/universities").catch(() => []),
+    ]);
 
-    const repeatCount = modules.filter((m) => m.is_repeat).length;
+    const repeatCandidates = modules.filter(
+      (m) => Boolean(m.is_repeat) || isGradeBelowC(m.grade_letter) || m.source_type === "repeat_add"
+    );
+    const repeatCount = repeatCandidates.length;
     const normalCount = modules.length - repeatCount;
 
     const barCtx = document.getElementById("page-repeatChart");
@@ -1316,16 +805,23 @@
     const improveSelect = document.getElementById("repeat-improve-module");
     if (improveSelect) {
       improveSelect.innerHTML = '<option value="">Select module</option>' +
-        modules.map((m) => `<option value="${m.id}">${m.name}${m.code ? " (" + m.code + ")" : ""} — ${m.grade_letter || "–"}</option>`).join("");
+        repeatCandidates.map((m) => `<option value="${m.id}">${m.name}${m.code ? " (" + m.code + ")" : ""} — ${m.grade_letter || "–"}</option>`).join("");
     }
-
+    const repeatAddUni = document.getElementById("repeat-add-university");
+    if (repeatAddUni) {
+      repeatAddUni.innerHTML =
+        '<option value="">Select university</option>' +
+        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
+    }
+//ERROR HANDLING
+    const academicHistoryModules = repeatCandidates;
     const tbody = document.getElementById("repeat-modules-tbody");
-    tbody.innerHTML = modules.length
-      ? modules
+    tbody.innerHTML = academicHistoryModules.length
+      ? academicHistoryModules
           .map(
             (m) =>
               `<tr>
-                <td>${m.name}</td><td>${m.code || "–"}</td><td>${m.credits}</td><td>${m.grade_letter || "–"}</td><td>${m.semester || "–"}</td>
+                <td>${m.name}</td><td>${m.code || "–"}</td><td>${m.credits}</td><td>${m.grade_letter || "–"}</td><td>${m.academic_year || "–"} / ${m.semester_in_year || "–"}</td>
                 <td>${m.is_repeat ? "Yes" : "No"}</td>
                 <td class="actions">
                   <button type="button" class="btn btn-ghost btn-small" data-repeat-improve="${m.id}">Improve</button>
@@ -1392,631 +888,47 @@
     });
   }
 
+  function initRepeatAddModuleForm() {
+    const form = document.getElementById("repeat-add-module-form");
+    if (!form || form.dataset.bound) return;
+    form.dataset.bound = "1";
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const university_id = document.getElementById("repeat-add-university")?.value || "";
+      const academic_year = parsePositiveInt(document.getElementById("repeat-add-academic-year")?.value);
+      const semester_in_year = parsePositiveInt(document.getElementById("repeat-add-semester-in-year")?.value);
+      const name = (document.getElementById("repeat-add-module-name")?.value || "").trim();
+      const code = normalizeCode(document.getElementById("repeat-add-module-code")?.value || "");
+      const credits = parseInt(document.getElementById("repeat-add-credits")?.value, 10);
+      if (!university_id || !academic_year || !semester_in_year || !name || !code || isNaN(credits)) {
+        return alert("Fill all module fields.");
+      }
+      const semester = (academic_year - 1) * 2 + semester_in_year;
+      const res = await post("/modules", {
+        user_id: currentUser.id,
+        university_id,
+        academic_year,
+        semester_in_year,
+        source_type: "repeat_add",
+        name,
+        code,
+        credits,
+        semester,
+        is_repeat: 1,
+      });
+      if (res?.error) return alert(res.error);
+      if (res?.updated) alert("Existing module record was updated for this module code.");
+      form.reset();
+      document.getElementById("repeat-add-academic-year").value = 1;
+      document.getElementById("repeat-add-semester-in-year").value = 1;
+      document.getElementById("repeat-add-credits").value = 3;
+      await loadRepeat();
+      await loadDashboard();
+    });
+  }
+
   initRepeatImprovementForm();
-
-  // ==============================
-  // Concerns (student + admin)
-  // ==============================
-
-  let universitiesCache = null;
-
-  async function loadUniversitiesCache() {
-    if (universitiesCache) return universitiesCache;
-    universitiesCache = await get("/universities").catch(() => []);
-    return universitiesCache;
-  }
-
-  function getUniversityNameById(universityId) {
-    const uid = parseInt(universityId, 10);
-    const uni = universitiesCache?.find((u) => u.id === uid);
-    return uni?.name || "Unknown";
-  }
-
-  async function loadConcernsPage() {
-    if (!currentUser) return;
-
-    await loadUniversitiesCache();
-
-    // Populate select
-    const uniSelect = document.getElementById("concerns-university-select");
-    if (uniSelect) {
-      uniSelect.innerHTML =
-        '<option value="">Select university</option>' +
-        universitiesCache.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-    }
-
-    // Render list
-    const tbody = document.getElementById("concerns-list-tbody");
-    if (tbody) {
-      const concerns = await get("/users/" + currentUser.id + "/concerns").catch(() => []);
-      tbody.innerHTML = concerns.length
-        ? concerns
-            .map(
-              (c) => `
-              <tr>
-                <td>${getUniversityNameById(c.university_id)}</td>
-                <td>${c.category || "—"}</td>
-                <td>${c.status || "—"}</td>
-                <td>${(c.message || "").slice(0, 180)}${(c.message || "").length > 180 ? "..." : ""}</td>
-                <td>${c.created_at ? String(c.created_at).slice(0, 10) : "—"}</td>
-              </tr>
-            `
-            )
-            .join("")
-        : "<tr><td colspan=\"5\">No concerns yet</td></tr>";
-    }
-
-    // Submit
-    const form = document.getElementById("concern-submit-form");
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = "1";
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const universityId = document.getElementById("concerns-university-select")?.value;
-        const category = document.getElementById("concerns-category")?.value || "General";
-        const message = document.getElementById("concerns-message")?.value || "";
-
-        if (!universityId) return alert("Select a university");
-        if (!message || message.trim().length < 3) return alert("Message is too short");
-        if (message.length > 2000) return alert("Message must be <= 2000 characters");
-
-        const res = await post("/concerns", {
-          user_id: currentUser.id,
-          university_id: universityId,
-          category,
-          message: message.trim(),
-        });
-        if (res && res.error) return alert(res.error);
-        trackUsage("concern_submit", "concerns", { university_id: universityId, category });
-        form.reset();
-        await loadConcernsPage();
-      });
-    }
-  }
-
-  // ==============================
-  // Admin pages
-  // ==============================
-
-  function requireAdminOnlyUI() {
-    if (!currentUser || currentUser.role !== "admin") {
-      alert("Admin access only");
-      return false;
-    }
-    return true;
-  }
-
-  async function loadAdminDashboard() {
-    if (!requireAdminOnlyUI()) return;
-    const [users, unis, hallsTotal, openConcerns] = await Promise.all([
-      get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []),
-      get("/universities").catch(() => []),
-      (async () => {
-        const unisRows = await get("/universities").catch(() => []);
-        let total = 0;
-        for (const u of unisRows) {
-          const hs = await get("/universities/" + u.id + "/halls").catch(() => []);
-          total += hs.length;
-        }
-        return total;
-      })(),
-      get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=open").catch(() => []),
-    ]);
-    document.getElementById("admin-total-users").textContent = users.length;
-    document.getElementById("admin-total-universities").textContent = unis.length;
-    document.getElementById("admin-open-concerns").textContent = openConcerns.length;
-    document.getElementById("admin-total-halls").textContent = hallsTotal;
-  }
-
-  async function loadAdminUsers() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-users-tbody");
-    if (!tbody) return;
-    const users = await get("/admin/users?admin_user_id=" + currentUser.id).catch(() => []);
-    tbody.innerHTML = users.length
-      ? users
-          .map(
-            (u) => `
-          <tr>
-            <td>${u.name || "—"}</td>
-            <td>${u.email || "—"}</td>
-            <td>${u.index_number || "—"}</td>
-            <td>${u.role || "student"}</td>
-            <td>${u.created_at ? String(u.created_at).slice(0, 10) : "—"}</td>
-            <td>
-              <select data-role-sel="${u.id}" class="admin-role-select">
-                <option value="student" ${u.role === "student" ? "selected" : ""}>student</option>
-                <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
-              </select>
-              <button type="button" class="btn btn-ghost btn-small" data-role-save="${u.id}">Save</button>
-            </td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"6\">No users</td></tr>";
-
-    tbody.querySelectorAll("[data-role-save]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-role-save");
-        const sel = tbody.querySelector('select[data-role-sel="' + id + '"]');
-        const role = sel?.value || "student";
-        const res = await put("/admin/users/" + id + "/role", { admin_user_id: currentUser.id, role });
-        if (res && res.error) alert(res.error);
-        // If the currently logged-in admin promoted/changed their own role,
-        // reload so the UI immediately switches to admin-only options.
-        if (String(id) === String(currentUser.id)) {
-          currentUser.role = role;
-          const nowIsAdmin = currentUser.role === "admin";
-          document.querySelectorAll(".admin-only").forEach((el) => el.classList.toggle("hidden", !nowIsAdmin));
-          document.querySelectorAll(".student-only").forEach((el) => el.classList.toggle("hidden", nowIsAdmin));
-          showPage(nowIsAdmin ? "admin-dashboard" : "dashboard");
-          return;
-        }
-        await loadAdminUsers();
-      });
-    });
-  }
-
-  async function loadAdminUniversitiesForHalls() {
-    if (!requireAdminOnlyUI()) return;
-    const universities = await loadUniversitiesCache();
-    const select = document.getElementById("admin-university-select-halls");
-    if (select) {
-      select.innerHTML =
-        '<option value="">Select university</option>' +
-        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-      if (!select.dataset.bound) {
-        select.dataset.bound = "1";
-        select.addEventListener("change", () => loadAdminHallsPage());
-      }
-    }
-    const ttSelect = document.getElementById("admin-university-select-timetable");
-    if (ttSelect) {
-      ttSelect.innerHTML =
-        '<option value="">Select university</option>' +
-        universities.map((u) => `<option value="${u.id}">${u.name}</option>`).join("");
-      if (!ttSelect.dataset.bound) {
-        ttSelect.dataset.bound = "1";
-        ttSelect.addEventListener("change", () => loadAdminTimetablePdfs());
-      }
-    }
-  }
-
-  async function loadAdminHallsPage() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-halls-tbody");
-    if (!tbody) return;
-
-    const mapEl = document.getElementById("admin-hall-map");
-    const latInput = document.getElementById("admin-hall-lat");
-    const lngInput = document.getElementById("admin-hall-lng");
-    const radiusInput = document.getElementById("admin-hall-radius");
-    const universityId = document.getElementById("admin-university-select-halls")?.value;
-
-    const syncCircle = () => {
-      if (!adminHallMap || !adminHallMarker || !adminHallCircle) return;
-      const lat = parseFloat(latInput?.value || "6.9271");
-      const lng = parseFloat(lngInput?.value || "79.8612");
-      const radius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
-      if (!isNaN(lat) && !isNaN(lng)) {
-        adminHallMarker.setLatLng([lat, lng]);
-        adminHallCircle.setLatLng([lat, lng]);
-      }
-      if (!isNaN(radius)) adminHallCircle.setRadius(radius);
-    };
-
-    if (mapEl && typeof L !== "undefined" && !adminHallMap) {
-      const initLat = parseFloat(latInput?.value || "6.9271");
-      const initLng = parseFloat(lngInput?.value || "79.8612");
-      const initRadius = Math.max(1, parseInt(radiusInput?.value || "80", 10));
-      adminHallMap = L.map(mapEl).setView([initLat, initLng], 16);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap contributors",
-      }).addTo(adminHallMap);
-      adminHallMarker = L.marker([initLat, initLng], { draggable: true }).addTo(adminHallMap);
-      adminHallCircle = L.circle([initLat, initLng], { radius: initRadius, color: "#00c9a7" }).addTo(adminHallMap);
-
-      adminHallMap.on("click", (e) => {
-        if (latInput) latInput.value = e.latlng.lat.toFixed(7);
-        if (lngInput) lngInput.value = e.latlng.lng.toFixed(7);
-        syncCircle();
-      });
-      adminHallMarker.on("dragend", () => {
-        const pos = adminHallMarker.getLatLng();
-        if (latInput) latInput.value = pos.lat.toFixed(7);
-        if (lngInput) lngInput.value = pos.lng.toFixed(7);
-        syncCircle();
-      });
-      if (latInput && !latInput.dataset.mapBound) {
-        latInput.dataset.mapBound = "1";
-        latInput.addEventListener("input", syncCircle);
-      }
-      if (lngInput && !lngInput.dataset.mapBound) {
-        lngInput.dataset.mapBound = "1";
-        lngInput.addEventListener("input", syncCircle);
-      }
-      if (radiusInput && !radiusInput.dataset.mapBound) {
-        radiusInput.dataset.mapBound = "1";
-        radiusInput.addEventListener("input", syncCircle);
-      }
-      setTimeout(() => adminHallMap.invalidateSize(), 50);
-    } else {
-      syncCircle();
-    }
-
-    const form = document.getElementById("admin-add-hall-form");
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = "1";
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const res = await post("/admin/lecture-halls", {
-          admin_user_id: currentUser.id,
-          university_id: document.getElementById("admin-university-select-halls")?.value,
-          hall_name: document.getElementById("admin-hall-name")?.value,
-          building_name: document.getElementById("admin-hall-building")?.value,
-          floor_number: document.getElementById("admin-hall-floor")?.value,
-          center_lat: document.getElementById("admin-hall-lat")?.value,
-          center_lng: document.getElementById("admin-hall-lng")?.value,
-          radius_m: document.getElementById("admin-hall-radius")?.value,
-        });
-        if (res && res.error) return alert(res.error);
-        form.reset();
-        await loadAdminHallsPage();
-      });
-    }
-
-    const uniForm = document.getElementById("admin-add-university-form");
-    if (uniForm && !uniForm.dataset.bound) {
-      uniForm.dataset.bound = "1";
-      uniForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const name = document.getElementById("admin-university-name")?.value || "";
-        const email = document.getElementById("admin-university-email")?.value || "";
-        const res = await post("/admin/universities", {
-          admin_user_id: currentUser.id,
-          name,
-          general_email: email,
-        });
-        if (res && res.error) return alert(res.error);
-        uniForm.reset();
-        universitiesCache = null;
-        await loadAdminUniversitiesForHalls();
-        await loadAdminHallsPage();
-      });
-    }
-
-    if (!universityId) {
-      tbody.innerHTML = "<tr><td colspan=\"7\">Select a university</td></tr>";
-      return;
-    }
-
-    const halls = await get("/universities/" + universityId + "/halls").catch(() => []);
-    tbody.innerHTML = halls.length
-      ? halls
-          .map(
-            (h) => `
-          <tr>
-            <td>${h.hall_name}</td>
-            <td>${h.building_name || "—"}</td>
-            <td>${h.floor_number ?? "—"}</td>
-            <td>${h.center_lat}</td>
-            <td>${h.center_lng}</td>
-            <td>${h.radius_m}</td>
-            <td><button type="button" class="btn btn-ghost btn-small" data-hall-remove="${h.id}">Remove</button></td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"7\">No halls yet</td></tr>";
-
-    tbody.querySelectorAll("[data-hall-remove]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-hall-remove");
-        const res = await fetch(API + "/admin/lecture-halls/" + id, {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ admin_user_id: currentUser.id }),
-          credentials: "include",
-        }).then((r) => r.json());
-        if (res && res.error) return alert(res.error);
-        await loadAdminHallsPage();
-      });
-    });
-  }
-
-  async function loadAdminTimetablePdfs() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-timetable-list-tbody");
-    if (!tbody) return;
-    const uni = document.getElementById("admin-university-select-timetable")?.value;
-    const url = uni
-      ? "/admin/timetable-pdfs?admin_user_id=" + currentUser.id + "&university_id=" + uni
-      : "/admin/timetable-pdfs?admin_user_id=" + currentUser.id;
-    const rows = await get(url).catch(() => []);
-    tbody.innerHTML = rows.length
-      ? rows
-          .map(
-            (r) => `
-          <tr>
-            <td>${r.semester}</td>
-            <td><a href="/uploads/${String(r.file_path).split(/[\\\\/]/).pop()}" target="_blank">Open PDF</a></td>
-            <td>${r.created_at ? String(r.created_at).slice(0, 10) : "—"}</td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"3\">No uploads yet</td></tr>";
-
-    const form = document.getElementById("admin-timetable-upload-form");
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = "1";
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const uid = document.getElementById("admin-university-select-timetable")?.value;
-        const semester = document.getElementById("admin-timetable-semester")?.value || "";
-        const fileInput = document.getElementById("admin-timetable-file");
-        const file = fileInput?.files?.[0];
-        if (!uid) return alert("Select a university");
-        if (!semester) return alert("Enter semester");
-        if (!file) return alert("Select a PDF file");
-
-        const fd = new FormData();
-        fd.append("admin_user_id", currentUser.id);
-        fd.append("university_id", uid);
-        fd.append("semester", semester);
-        fd.append("file", file);
-
-        const resp = await fetch(API + "/admin/timetable-pdfs", { method: "POST", body: fd, credentials: "include" });
-        const json = await resp.json().catch(() => ({}));
-        if (!resp.ok || json.error) return alert(json.error || "Upload failed");
-        form.reset();
-        await loadAdminTimetablePdfs();
-      });
-    }
-  }
-
-  async function loadAdminConcerns() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-concerns-tbody");
-    if (!tbody) return;
-    const status = document.getElementById("admin-concerns-status")?.value || "open";
-    const rows = await get("/admin/concerns?admin_user_id=" + currentUser.id + "&status=" + status).catch(() => []);
-    tbody.innerHTML = rows.length
-      ? rows
-          .map(
-            (c) => `
-          <tr>
-            <td>${c.student_name || "—"}</td>
-            <td>${c.university_name || "—"}</td>
-            <td>${c.category || "—"}</td>
-            <td>${c.status || "—"}</td>
-            <td>${(c.message || "").slice(0, 220)}${(c.message || "").length > 220 ? "..." : ""}</td>
-            <td>
-              ${
-                c.status === "forwarded"
-                  ? "—"
-                  : `<button type="button" class="btn btn-ghost btn-small" data-forward="${c.id}">Forward</button>`
-              }
-            </td>
-          </tr>
-        `
-          )
-          .join("")
-      : "<tr><td colspan=\"6\">No concerns</td></tr>";
-
-    tbody.querySelectorAll("[data-forward]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-forward");
-        const res = await post("/admin/concerns/" + id + "/forward", { admin_user_id: currentUser.id });
-        if (res && res.error) return alert(res.error);
-        await loadAdminConcerns();
-      });
-    });
-
-    const refreshBtn = document.getElementById("admin-refresh-concerns-btn");
-    if (refreshBtn && !refreshBtn.dataset.bound) {
-      refreshBtn.dataset.bound = "1";
-      refreshBtn.addEventListener("click", () => loadAdminConcerns());
-    }
-    const statusSelect = document.getElementById("admin-concerns-status");
-    if (statusSelect && !statusSelect.dataset.bound) {
-      statusSelect.dataset.bound = "1";
-      statusSelect.addEventListener("change", () => loadAdminConcerns());
-    }
-  }
-
-  async function loadAdminUsage() {
-    if (!requireAdminOnlyUI()) return;
-    const days = 7;
-    const summary = await get("/admin/analytics/usage-summary?admin_user_id=" + currentUser.id + "&days=" + days).catch(() => null);
-    if (!summary) return;
-    const rows = summary.rows || [];
-
-    const total = rows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-events").textContent = total;
-
-    // page_view + task_add split
-    const pageViewRows = rows.filter((r) => r.event_type === "page_view");
-    const taskAddRows = rows.filter((r) => r.event_type === "task_add");
-    const pageViews = pageViewRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    const taskAdds = taskAddRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-page-views").textContent = pageViews;
-    document.getElementById("admin-total-task-adds").textContent = taskAdds;
-
-    const taskCompleteRows = rows.filter((r) => r.event_type === "task_complete");
-    const taskCompletes = taskCompleteRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-task-completes").textContent = taskCompletes;
-
-    const attendanceRows = rows.filter((r) => r.event_type === "attendance_mark");
-    const attendanceMarks = attendanceRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-attendance-marks").textContent = attendanceMarks;
-
-    const concernRows = rows.filter((r) => r.event_type === "concern_submit");
-    const concernSubmits = concernRows.reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0);
-    document.getElementById("admin-total-concerns-submits").textContent = concernSubmits;
-
-    const daysArr = Array.from(new Set(rows.map((r) => r.day))).sort();
-    const pageByDay = daysArr.map((d) =>
-      rows.filter((r) => r.day === d && r.event_type === "page_view").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
-    );
-    const taskByDay = daysArr.map((d) =>
-      rows.filter((r) => r.day === d && r.event_type === "task_add").reduce((acc, r) => acc + (parseInt(r.count, 10) || 0), 0)
-    );
-
-    const ctx = document.getElementById("admin-usage-chart");
-    if (ctx) {
-      if (adminUsageChart) adminUsageChart.destroy();
-      adminUsageChart = new Chart(ctx, {
-        type: "bar",
-        data: {
-          labels: daysArr,
-          datasets: [
-            { label: "Page views", data: pageByDay, backgroundColor: "#00c9a7" },
-            { label: "Task adds", data: taskByDay, backgroundColor: "#f59e0b" },
-          ],
-        },
-        options: { responsive: true, maintainAspectRatio: true },
-      });
-    }
-
-    const exportBtn = document.getElementById("admin-export-usage-excel");
-    if (exportBtn && !exportBtn.dataset.bound) {
-      exportBtn.dataset.bound = "1";
-      exportBtn.addEventListener("click", () => {
-        window.open(
-          API + "/admin/analytics/usage-export-excel?admin_user_id=" + currentUser.id + "&days=" + days,
-          "_blank"
-        );
-      });
-    }
-  }
-
-  // ==============================
-  // Admin: attendance verification queue
-  // ==============================
-
-  async function loadAdminAttendanceQueue() {
-    if (!requireAdminOnlyUI()) return;
-    const tbody = document.getElementById("admin-attendance-queue-tbody");
-    if (!tbody) return;
-
-    const statusSel = document.getElementById("admin-attendance-queue-status");
-    const status = statusSel?.value || "";
-    const refreshBtn = document.getElementById("admin-attendance-queue-refresh");
-
-    const url = status
-      ? "/admin/attendance-queue?admin_user_id=" + currentUser.id + "&status=" + status
-      : "/admin/attendance-queue?admin_user_id=" + currentUser.id;
-
-    const rows = await get(url).catch(() => []);
-
-    tbody.innerHTML = rows.length
-      ? rows
-          .map(
-            (r) => {
-              const hallText = r.hall_name ? `${r.hall_name}${r.building_name ? " (" + r.building_name + ")" : ""}` : "—";
-              const proofLink = r.proof_path
-                ? `<a href="/uploads/${String(r.proof_path).split(/[\\\\/]/).pop()}" target="_blank">View</a>`
-                : "—";
-              const attendanceText = `${r.attended}/${r.total_sessions}`;
-
-              const canModerate = r.verification_status === "pending" || r.verification_status === "timetable_missing";
-              return `
-                <tr>
-                  <td>${r.student_name || "—"}</td>
-                  <td>${r.module_name || "—"}</td>
-                  <td>${r.university_name || "—"}</td>
-                  <td>${hallText}</td>
-                  <td>${r.delivery_mode || "—"}</td>
-                  <td>${r.lecture_date ? String(r.lecture_date).slice(0, 10) : "—"}</td>
-                  <td>${attendanceText}</td>
-                  <td>${r.verification_status || "—"}</td>
-                  <td>${proofLink}</td>
-                  <td>
-                    ${
-                      canModerate
-                        ? `<div class="actions">
-                            <button type="button" class="btn btn-ghost btn-small" data-approve="${r.id}">Approve</button>
-                            <button type="button" class="btn btn-danger-outline btn-small" data-reject="${r.id}">Reject</button>
-                           </div>`
-                        : "—"
-                    }
-                  </td>
-                </tr>
-              `;
-            }
-          )
-          .join("")
-      : "<tr><td colspan=\"10\">No pending items</td></tr>";
-
-    tbody.querySelectorAll("[data-approve]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-approve");
-        const res = await post("/admin/attendance-queue/" + id + "/approve", { admin_user_id: currentUser.id });
-        if (res && res.error) return alert(res.error);
-        await loadAdminAttendanceQueue();
-      });
-    });
-
-    tbody.querySelectorAll("[data-reject]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-reject");
-        const res = await post("/admin/attendance-queue/" + id + "/reject", { admin_user_id: currentUser.id });
-        if (res && res.error) return alert(res.error);
-        await loadAdminAttendanceQueue();
-      });
-    });
-
-    if (refreshBtn && !refreshBtn.dataset.bound) {
-      refreshBtn.dataset.bound = "1";
-      refreshBtn.addEventListener("click", () => loadAdminAttendanceQueue());
-    }
-    if (statusSel && !statusSel.dataset.bound) {
-      statusSel.dataset.bound = "1";
-      statusSel.addEventListener("change", () => loadAdminAttendanceQueue());
-    }
-  }
-
-  // ==============================
-  // Delete Profile
-  // ==============================
-
-  const deleteOverlay = document.getElementById("delete-profile-overlay");
-  const deleteConfirmBtn = document.getElementById("delete-profile-confirm");
-  const deleteCancelBtn = document.getElementById("delete-profile-cancel");
-
-  document.getElementById("delete-profile-btn").addEventListener("click", () => {
-    if (deleteOverlay) deleteOverlay.classList.add("active");
-  });
-
-  if (deleteCancelBtn) {
-    deleteCancelBtn.addEventListener("click", () => {
-      if (deleteOverlay) deleteOverlay.classList.remove("active");
-    });
-  }
-
-  if (deleteOverlay) {
-    deleteOverlay.addEventListener("click", (e) => {
-      if (e.target === deleteOverlay) deleteOverlay.classList.remove("active");
-    });
-  }
-
-  if (deleteConfirmBtn) {
-    deleteConfirmBtn.addEventListener("click", async () => {
-      try {
-        await del("/users/" + currentUser.id);
-        currentUser = null;
-        document.getElementById("app").classList.add("hidden");
-        document.getElementById("auth-screen").classList.remove("hidden");
-        document.getElementById("register-screen").classList.add("hidden");
-        if (deleteOverlay) deleteOverlay.classList.remove("active");
-      } catch (err) {
-        alert("Failed to delete profile. Please try again.");
-      }
-    });
-  }
-
+  initRepeatAddModuleForm();
   // ==============================
   // Geofence (attendance) – circle based on admin-configured lecture halls
   // ==============================
@@ -2046,7 +958,7 @@
       checkBtn.disabled = true;
       checkBtn.textContent = "Checking...";
       statusText.textContent = "Verifying location...";
-      statusDetail.textContent = "Getting your position...";
+        statusDetail.textContent = "Getting your GPS position...";
       statusCard.classList.remove("within", "outside");
 
       const domUniId = parseInt(document.getElementById("attendance-university-select")?.value, 10);
@@ -2055,7 +967,7 @@
         checkBtn.disabled = false;
         checkBtn.textContent = "Check location";
         statusText.textContent = "Check your location to mark attendance";
-        statusDetail.textContent = "Tap \"Check location\" after selecting a university";
+      statusDetail.textContent = "Tap \"Check location\" after selecting a university to verify by GPS";
         return;
       }
 
@@ -2118,7 +1030,11 @@
       };
 
       if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(onSuccess, onError, { timeout: 10000 });
+        navigator.geolocation.getCurrentPosition(onSuccess, onError, {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0,
+        });
       } else {
         onError();
       }
@@ -2126,14 +1042,6 @@
   }
 
   initGeofence();
-
-  // ==============================
-  // PDF Report
-  // ==============================
-
-  document.getElementById("download-report").addEventListener("click", () => {
-    window.open(API + "/users/" + currentUser.id + "/report.pdf", "_blank");
-  });
 
   // ==============================
   // Logout
