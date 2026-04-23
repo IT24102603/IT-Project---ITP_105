@@ -23,26 +23,22 @@ Academic performance management for Sri Lankan university students – GPA/CGPA,
      mysql -u root -p uninavigator < schema.sql
      ```
 
-### 3) Configure environment variables
-
-Copy `.env.example` to `.env` and edit values.
-
-### 4) Install dependencies
+### 3) Install dependencies
    ```bash
    cd uninavigator
    npm install
    ```
 
-### 5) Start the server
+### 4) Start the server
    ```bash
    npm start
    ```
 
-### 6) Open in browser
+### 5) Open in browser
 
 **http://localhost:3000**
 
-## Features (from ITP_105 PDF)
+## Features
 
 - **User management** – Register, login, profile
 - **GPA Tracker & Goal Calculator** – Weighted credit method; add modules, view CGPA and semester GPAs
@@ -61,14 +57,16 @@ Copy `.env.example` to `.env` and edit values.
 
 ```
 uninavigator/
-├── server.js          # API + DB + PDF
+├── backend
+│   ├──server.js           # API + DB + PDF
+│   ├──schema.sql          # MySQL tables
+│   ├──uploads
+├── frontend
+│   ├── public/
+│   │   ├── index.html     # All pages (SPA-style)
+│   │   ├── css/style.css
+│   │   └── js/app.js       
 ├── package.json
 ├── package-lock.json
-├── schema.sql          # MySQL tables
-├── .env.example        # MySQL connection settings
-├── public/
-│   ├── index.html     # All pages (SPA-style)
-│   ├── css/style.css
-│   └── js/app.js
 └── README.md
 ```
